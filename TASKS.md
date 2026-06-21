@@ -31,10 +31,10 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **What was done:** Added `src/config/env.ts` — a zod schema for `NODE_ENV` (enum, default `development`), `PORT` (`z.coerce.number().int().positive().max(65535)`, default `4000`), and `LOG_LEVEL` (enum, default `info`). `loadEnv()` uses `safeParse`; on failure it prints each invalid/missing field and `process.exit(1)` (fail fast); on success it returns a `Object.freeze`'d, typed `env`. Also exports `isProduction` / `isTest`. Verified in an isolated project: `tsc --noEmit` passes, defaults resolve (4000/development/info), invalid values (`PORT=-3`, `LOG_LEVEL=loud`) print clear errors and exit 1, valid overrides work. Removed `src/config/.gitkeep`.
 - **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *12-Factor Config & Fail-Fast Validation* (wired into the app track at Task 0.8).
 
-### Task 0.3 — Structured logging + request IDs · ☐ Pending
+### Task 0.3 — Structured logging + request IDs · ✅ Done
 - **Prompt:** "Add `src/lib/logger.ts` (pino) and `pino-http` request logging with a per-request correlation id propagated on `req`/responses."
-- **What was done:** —
-- **Course update:** Lesson — *Structured logging & correlation IDs* (why JSON logs over console.log; request tracing).
+- **What was done:** Added `src/lib/logger.ts` — a pino logger at `env.LOG_LEVEL` with secret **redaction** (authorization/cookie/set-cookie headers, `*.password`, `*.token`). Added `src/middleware/httpLogger.ts` — `pino-http` with `genReqId` that reuses an incoming `x-request-id` or generates a UUID, **echoes it on the response header**, and binds it to `req.id`/`req.log`; `customLogLevel` maps 5xx→error, 4xx→warn, else info. Verified in an isolated project: `tsc --noEmit` passes; runtime test confirms a generated id is echoed and `body.id === x-request-id`, an inbound `x-request-id: trace-abc-123` is reused, and request/response lines are structured JSON sharing the id. Removed `src/lib/.gitkeep` and `src/middleware/.gitkeep`.
+- **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Structured Logging & Correlation IDs* (wired into the app track at Task 0.8).
 
 ### Task 0.4 — Express app factory + error handling · ☐ Pending
 - **Prompt:** "Add `src/app.ts` building the Express app (json, security middleware placeholders), an `AppError` class, a centralized error handler returning a consistent JSON envelope, and a 404 handler."
@@ -185,7 +185,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 2 | 🟡 In progress |
+| 0 — Foundations | 8 | 3 | 🟡 In progress |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -202,4 +202,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.2 complete — config loader with fail-fast zod validation._
+_Last updated: Task 0.3 complete — pino structured logging + correlation-id request logging._

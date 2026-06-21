@@ -49,3 +49,49 @@ Keep `.env.example` in sync (it's part of the Definition of Done).
 
 **Quiz idea.** *Why validate config at boot instead of where it's used?* → To fail fast: a missing/invalid
 value stops startup with a clear error, instead of crashing unpredictably mid-request later.
+
+### Lesson (Task 0.3): Structured Logging & Correlation IDs
+
+**The Problem.** `console.log` produces unstructured text that's painful to search, filter, or ship to a
+log platform — and when many requests run concurrently, their log lines interleave with no way to tell
+which line belongs to which request. Debugging "what happened to *that* request?" becomes guesswork.
+
+**Options on the table.**
+- *`console.log` everywhere* — zero setup, but unstructured, no levels, unsearchable, leaks secrets easily.
+- *A structured logger (pino/winston)* — JSON output, log levels, redaction; small setup cost.
+- *Logger + per-request correlation id* — additionally stitches every line of one request together via a shared id; the gold standard for tracing.
+
+**Decision & Why.** Use **pino** (fast, JSON-first) for structured logs at a config-driven level, with
+**secret redaction**, plus **pino-http** to log each request/response and attach a **correlation id**.
+The id is reused from an incoming `x-request-id` (so it survives across a gateway/other services) or
+generated, then echoed on the response and bound to `req.log`. One id ties a whole request together —
+the single most useful thing when debugging production.
+
+**Implementation.**
+```ts
+// src/lib/logger.ts — JSON logs, level from env, secrets redacted
+export const logger = pino({
+  level: env.LOG_LEVEL,
+  redact: { paths: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'], remove: true },
+});
+
+// src/middleware/httpLogger.ts — request logging + correlation id
+export const httpLogger = pinoHttp({
+  logger,
+  genReqId(req, res) {
+    const incoming = req.headers['x-request-id'];
+    const id = (Array.isArray(incoming) ? incoming[0] : incoming) || randomUUID();
+    res.setHeader('x-request-id', id);   // echo it back
+    return id;                            // becomes req.id, bound to req.log
+  },
+  customLogLevel: (_req, res, err) => (res.statusCode >= 500 || err ? 'error' : res.statusCode >= 400 ? 'warn' : 'info'),
+});
+```
+
+**Pitfalls.** Never log credentials — configure `redact` up front. Always *reuse* an inbound
+`x-request-id` instead of overwriting it, so traces survive across services. Use `req.log` (the
+child logger with the id bound), not the root `logger`, inside request handlers. JSON is hard to read by
+eye in dev — pipe through `pino-pretty`, don't switch back to `console.log`.
+
+**Quiz idea.** *Why attach a correlation id to every request?* → So all log lines for one request share an
+id and can be traced together, even when many requests run concurrently and across service hops.
