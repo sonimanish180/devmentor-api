@@ -46,10 +46,10 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **What was done:** Added `src/modules/health/readiness.ts` — a dependency-free **check registry** (`registerReadinessCheck`, `runReadinessChecks`) that runs checks in parallel and reports per-dependency up/down. Added `src/modules/health/health.routes.ts` — `GET /health` (liveness: status/uptime/timestamp, no deps) and `GET /ready` (runs the registry; **503 `not_ready`** if any check fails, else 200 `ready`). Mounted `healthRouter` early in `createApp()` (before future auth/rate-limit). Verified: `tsc --noEmit` passes; live run shows `/health`→200, `/ready`→200 with no checks, and `/ready`→503 once a failing `redis` check is registered (with `{postgres: up, redis: down}` detail). Removed `src/modules/.gitkeep`.
 - **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Liveness vs Readiness Probes* (wired into the app track at Task 0.8).
 
-### Task 0.6 — Server entrypoint + graceful shutdown · ☐ Pending
+### Task 0.6 — Server entrypoint + graceful shutdown · ✅ Done
 - **Prompt:** "Add `src/server.ts` that starts the HTTP server and handles SIGTERM/SIGINT by draining in-flight requests before exit; wire `pnpm dev`."
-- **What was done:** —
-- **Course update:** Lesson — *Graceful shutdown & why it matters under load balancers*.
+- **What was done:** Added `src/lib/shutdown.ts` — a LIFO shutdown-hook registry (`onShutdown`/`runShutdownHooks`) for DB/Redis/workers to close into in later phases. Added `src/server.ts` — boots `createApp()` on `env.PORT`; on SIGTERM/SIGINT it stops accepting new connections (`server.close`), lets in-flight requests finish, calls `server.closeIdleConnections()` to free idle keep-alives, runs shutdown hooks, and exits — with a 10s force-exit safety net; also logs `unhandledRejection` and exits on `uncaughtException`. (`pnpm dev` already runs `tsx watch src/server.ts`.) Verified: `tsc --noEmit` passes; real `server.ts` serves `/health` then on SIGTERM logs "draining"→"Shutdown complete" and exits 0; a drain test showed an 827ms in-flight request **completed (200)** despite SIGTERM at ~200ms while new requests were refused, then the process exited 0.
+- **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Graceful Shutdown* (wired into the app track at Task 0.8).
 
 ### Task 0.7 — Local Docker stack · ☐ Pending
 - **Prompt:** "Add `docker-compose.yml` (Postgres + Redis with healthchecks), a dev `Dockerfile`, and `.dockerignore`. Confirm `docker compose up` is green."
@@ -185,7 +185,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 5 | 🟡 In progress |
+| 0 — Foundations | 8 | 6 | 🟡 In progress |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -202,4 +202,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.5 complete — liveness `/health` + readiness `/ready` with a pluggable check registry._
+_Last updated: Task 0.6 complete — server entrypoint with graceful drain-and-shutdown (verified in-flight requests survive SIGTERM)._

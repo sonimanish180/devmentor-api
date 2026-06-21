@@ -177,3 +177,43 @@ probes cheap (no heavy queries) since they run frequently. Leave them unauthenti
 **Quiz idea.** *Your DB has a 5-second blip. Which probe should fail, and what happens?* → `/ready` fails
 (503) so the load balancer stops sending traffic; `/health` stays 200 so the process is **not** restarted,
 and traffic resumes automatically once the DB recovers.
+
+### Lesson (Task 0.6): Graceful Shutdown
+
+**The Problem.** Deploys, autoscaling, and crashes constantly stop processes. When an orchestrator
+replaces an instance it sends **SIGTERM**. If the process dies instantly, every in-flight request is
+dropped (users see 502s) and open resources (DB connections, queue jobs) are abandoned mid-work — the
+opposite of zero-downtime. The default Node behavior on SIGTERM is to exit immediately.
+
+**Options on the table.**
+- *Do nothing* — instant exit on SIGTERM; drops in-flight requests on every deploy.
+- *`server.close()` on SIGTERM* — stop accepting new connections, let in-flight finish; but keep-alive sockets can hold it open, and resources still need closing.
+- *Full graceful shutdown* — `server.close()` + close idle keep-alive sockets + run resource-close hooks + a force-exit timeout as a safety net.
+
+**Decision & Why.** On SIGTERM/SIGINT: stop accepting new connections, **let in-flight requests finish**,
+nudge idle keep-alive sockets closed (`server.closeIdleConnections()`), run **shutdown hooks** (a LIFO
+registry that DB/Redis/workers register into in later phases), then exit — with a **force-exit timer** so
+a stuck connection can't hang the deploy forever. Also log `unhandledRejection` and exit on
+`uncaughtException` (the process is in an unknown state).
+
+**Implementation.**
+```ts
+async function shutdown(signal) {
+  if (shuttingDown) return; shuttingDown = true;
+  const force = setTimeout(() => process.exit(1), FORCE_EXIT_MS).unref(); // safety net
+  server.close(async () => { await runShutdownHooks(); clearTimeout(force); process.exit(0); });
+  server.closeIdleConnections?.(); // free idle keep-alives so close() can complete
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT',  () => void shutdown('SIGINT'));
+```
+
+**Pitfalls.** Forgetting idle keep-alive sockets — `server.close()` waits on them and seems to "hang".
+No force-exit timeout — one stuck client blocks the whole deploy. Re-entrancy — guard against a second
+signal. Closing resources in the wrong order — close in **reverse** of how you opened them (LIFO). Don't
+forget the kernel/orchestrator also has its own kill-timeout (e.g. k8s `terminationGracePeriodSeconds`)
+which should exceed your drain budget.
+
+**Quiz idea.** *Why call `server.closeIdleConnections()` during shutdown?* → HTTP keep-alive leaves idle
+sockets open; `server.close()` waits for all connections to end, so without closing idle ones it appears
+to hang. Closing idle sockets lets active requests finish while the server still shuts down promptly.
