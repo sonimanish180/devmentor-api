@@ -217,3 +217,49 @@ which should exceed your drain budget.
 **Quiz idea.** *Why call `server.closeIdleConnections()` during shutdown?* → HTTP keep-alive leaves idle
 sockets open; `server.close()` waits for all connections to end, so without closing idle ones it appears
 to hang. Closing idle sockets lets active requests finish while the server still shuts down promptly.
+
+### Lesson (Task 0.7): Reproducible Local Environments with Docker Compose
+
+**The Problem.** The app needs Postgres and Redis to run. Asking every developer (and CI) to install and
+configure the right versions by hand causes "works on my machine" drift, version mismatches, and slow
+onboarding. State also needs to persist across restarts and be easy to reset.
+
+**Options on the table.**
+- *Install Postgres/Redis natively per machine* — fast once done, but version drift and painful onboarding/CI.
+- *Docker Compose for backing services, app on host* — one command spins up pinned versions; app keeps hot-reload speed on the host.
+- *Everything in Compose (app too)* — maximum parity, but slower inner-loop in dev; better saved for the full stack later (Phase 14).
+
+**Decision & Why.** Run **Postgres + Redis in Docker Compose** with **pinned image versions**, **named
+volumes** for persistence, and **healthchecks** so `docker compose ps` reports real readiness (and other
+services can `depends_on: condition: service_healthy`). The **app runs on the host** via `pnpm dev` for a
+fast edit-reload loop. A dev `Dockerfile` + `.dockerignore` exist for when we containerize the app (the
+hardened multi-stage prod build and full stack come in Phase 14).
+
+**Implementation.**
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine          # pin the version
+    environment: { POSTGRES_USER: devmentor, POSTGRES_PASSWORD: devmentor, POSTGRES_DB: devmentor }
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]   # persist data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devmentor -d devmentor"]
+      interval: 5s; timeout: 3s; retries: 10
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10 }
+volumes: { pgdata: {}, redisdata: {} }
+```
+
+**Pitfalls.** Don't use floating tags like `postgres:latest` — pin versions for reproducibility. Without a
+**healthcheck**, dependents start before the DB is actually accepting connections (race on boot). Without a
+named **volume**, data vanishes on `docker compose down`. Keep secrets out of the committed file (fine for
+local dev creds; use real secret management in prod). `.dockerignore` keeps `node_modules`/`.env`/`.git`
+out of the build context (smaller, safer images).
+
+**Quiz idea.** *Why add a healthcheck to the Postgres service instead of assuming it's ready when the
+container starts?* → The container being "up" only means the process launched; Postgres needs a moment to
+accept connections. A healthcheck reports true readiness, so dependents can wait on `service_healthy`
+instead of crashing on a connection-refused race at boot.

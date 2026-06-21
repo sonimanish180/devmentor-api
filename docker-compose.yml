@@ -1,0 +1,46 @@
+# Local dev dependencies for devmentor-api.
+# The API itself runs on the host via `pnpm dev` during development; only the
+# stateful backing services live in Docker here. (A full containerized stack —
+# api + worker + pgbouncer + kafka — arrives in Phase 14.)
+#
+#   docker compose up -d        # start postgres + redis
+#   docker compose ps           # both should be "healthy"
+#   docker compose down         # stop (add -v to wipe data volumes)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: devmentor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: devmentor
+      POSTGRES_PASSWORD: devmentor
+      POSTGRES_DB: devmentor
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devmentor -d devmentor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: devmentor-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

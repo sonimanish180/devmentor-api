@@ -51,10 +51,11 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **What was done:** Added `src/lib/shutdown.ts` — a LIFO shutdown-hook registry (`onShutdown`/`runShutdownHooks`) for DB/Redis/workers to close into in later phases. Added `src/server.ts` — boots `createApp()` on `env.PORT`; on SIGTERM/SIGINT it stops accepting new connections (`server.close`), lets in-flight requests finish, calls `server.closeIdleConnections()` to free idle keep-alives, runs shutdown hooks, and exits — with a 10s force-exit safety net; also logs `unhandledRejection` and exits on `uncaughtException`. (`pnpm dev` already runs `tsx watch src/server.ts`.) Verified: `tsc --noEmit` passes; real `server.ts` serves `/health` then on SIGTERM logs "draining"→"Shutdown complete" and exits 0; a drain test showed an 827ms in-flight request **completed (200)** despite SIGTERM at ~200ms while new requests were refused, then the process exited 0.
 - **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Graceful Shutdown* (wired into the app track at Task 0.8).
 
-### Task 0.7 — Local Docker stack · ☐ Pending
+### Task 0.7 — Local Docker stack · ✅ Done
 - **Prompt:** "Add `docker-compose.yml` (Postgres + Redis with healthchecks), a dev `Dockerfile`, and `.dockerignore`. Confirm `docker compose up` is green."
-- **What was done:** —
-- **Course update:** Lesson — *Reproducible local environments with Docker Compose*.
+- **What was done:** Added `docker-compose.yml` — `postgres:16-alpine` and `redis:7-alpine`, both with **healthchecks** (`pg_isready` / `redis-cli ping`), pinned versions, named volumes (`pgdata`, `redisdata`), and port mappings 5432/6379. Added a dev `Dockerfile` (node:20-alpine + corepack pnpm, layer-cached install, `pnpm dev`) and `.dockerignore` (excludes node_modules/dist/.git/.env/logs/docs). The API runs on the host in dev; full containerized stack is deferred to Phase 14.
+- **Verification note:** Compose YAML validated (services, healthchecks, volumes parsed OK). **Docker isn't available in the build sandbox**, so `docker compose up` must be confirmed green on the host: `docker compose up -d && docker compose ps` → both `healthy`.
+- **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Reproducible Local Environments with Docker Compose* (wired into the app track at Task 0.8).
 
 ### Task 0.8 — ADR-0001 + create the course track · ☐ Pending
 - **Prompt:** "Write `docs/adr/0001-foundational-stack.md` (Express+TS, CommonJS, pnpm, modular monolith — problem/options/decision/consequences). Create `devmentor/src/data/backend-build-curriculum.ts` with the Phase 0 module (intro + the lessons above), register it in `curriculum.ts` + a home-page tab + `/docs` if relevant. Update README tracker + ADR index. `tsc --noEmit` clean."
@@ -185,7 +186,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 6 | 🟡 In progress |
+| 0 — Foundations | 8 | 7 | 🟡 In progress |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -202,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.6 complete — server entrypoint with graceful drain-and-shutdown (verified in-flight requests survive SIGTERM)._
+_Last updated: Task 0.7 complete — docker-compose (Postgres + Redis, healthchecked), dev Dockerfile & .dockerignore._
