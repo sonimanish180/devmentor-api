@@ -95,3 +95,45 @@ eye in dev — pipe through `pino-pretty`, don't switch back to `console.log`.
 
 **Quiz idea.** *Why attach a correlation id to every request?* → So all log lines for one request share an
 id and can be traced together, even when many requests run concurrently and across service hops.
+
+### Lesson (Task 0.4): App Composition & a Consistent Error Model
+
+**The Problem.** Without a deliberate error strategy, every route invents its own error shape
+(`res.status(400).send('bad')` here, a thrown string there), async errors silently hang the request, and
+a stray exception can leak a stack trace or a database DSN to the client. Clients can't handle errors
+programmatically, and you can't trace failures.
+
+**Options on the table.**
+- *Handle errors inline in each route* — flexible but inconsistent, repetitive, and easy to leak internals.
+- *A single centralized error-handling middleware + an error envelope* — one shape, one place to log/scrub.
+- *…plus a typed `AppError`* — routes throw intent (`AppError.notFound()`); the handler renders it. Clear separation of "expected" vs "unexpected" failures.
+
+**Decision & Why.** A **factory** (`createApp()`) composes middleware in a deliberate order, a typed
+**`AppError`** carries `statusCode`/`code`/`details`, and **one error handler** renders a single envelope
+`{ error: { code, message, details?, requestId } }`. Unknown (non-`AppError`) errors become a generic 500
+whose real message is **hidden in production** but always logged. A `notFound` handler turns unmatched
+routes into the same envelope, and `asyncHandler` forwards rejected promises to the handler.
+
+**Implementation.**
+```ts
+// AppError: throw intent from anywhere
+throw AppError.badRequest('email is required', [{ field: 'email' }]);
+
+// One handler renders every error consistently
+res.status(statusCode).json({ error: { code, message, details, requestId: req.id } });
+// unknown errors → 500, message hidden when NODE_ENV=production
+
+// async routes never hang:
+router.get('/x', asyncHandler(async (req, res) => { ... }));
+
+// middleware order in createApp(): logger → json → (security) → routes → notFound → errorHandler
+```
+
+**Pitfalls.** The error handler **must** be registered last and have the 4-arg signature
+`(err, req, res, next)` or Express won't treat it as one. Check `res.headersSent` and defer to `next(err)`
+if the response already started. Never echo raw error messages/stacks to clients in production. Express 4
+won't catch async throws — wrap with `asyncHandler` (or migrate to Express 5).
+
+**Quiz idea.** *Why hide the message of an unknown 500 error in production but not an `AppError`?* →
+`AppError`s are deliberate, client-safe messages; an unknown error's message may leak internals (paths,
+DSNs, stack), so it's replaced with a generic message and only written to server logs.

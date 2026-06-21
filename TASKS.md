@@ -36,10 +36,10 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **What was done:** Added `src/lib/logger.ts` — a pino logger at `env.LOG_LEVEL` with secret **redaction** (authorization/cookie/set-cookie headers, `*.password`, `*.token`). Added `src/middleware/httpLogger.ts` — `pino-http` with `genReqId` that reuses an incoming `x-request-id` or generates a UUID, **echoes it on the response header**, and binds it to `req.id`/`req.log`; `customLogLevel` maps 5xx→error, 4xx→warn, else info. Verified in an isolated project: `tsc --noEmit` passes; runtime test confirms a generated id is echoed and `body.id === x-request-id`, an inbound `x-request-id: trace-abc-123` is reused, and request/response lines are structured JSON sharing the id. Removed `src/lib/.gitkeep` and `src/middleware/.gitkeep`.
 - **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Structured Logging & Correlation IDs* (wired into the app track at Task 0.8).
 
-### Task 0.4 — Express app factory + error handling · ☐ Pending
+### Task 0.4 — Express app factory + error handling · ✅ Done
 - **Prompt:** "Add `src/app.ts` building the Express app (json, security middleware placeholders), an `AppError` class, a centralized error handler returning a consistent JSON envelope, and a 404 handler."
-- **What was done:** —
-- **Course update:** Lesson — *App composition & a consistent error model*.
+- **What was done:** Added `src/lib/AppError.ts` (typed operational error with `statusCode`/`code`/`details`/`isOperational` + static helpers: badRequest/unauthorized/forbidden/notFound/conflict/tooManyRequests/internal), `src/lib/asyncHandler.ts` (forwards async rejections to `next`), `src/middleware/notFound.ts` (unmatched routes → 404 `AppError`), `src/middleware/errorHandler.ts` (renders one envelope `{ error: { code, message, details?, requestId } }`; maps `AppError` + `ZodError`; unknown errors → 500 with message hidden when `NODE_ENV=production`; logs 5xx as error / 4xx as warn via `req.log`), and `src/app.ts` (`createApp()` factory with deliberate middleware order: httpLogger → json → [security later] → routes → notFound → errorHandler; `x-powered-by` disabled). Verified: `tsc --noEmit` passes; live run shows `/ok`→200, `/bad`→400 (BAD_REQUEST + details), `/boom`→500 (generic message in prod, real error logged), `/async`→409, `/nope`→404 — all with a `requestId`.
+- **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *App Composition & a Consistent Error Model* (wired into the app track at Task 0.8).
 
 ### Task 0.5 — Health & readiness endpoints · ☐ Pending
 - **Prompt:** "Add `/health` (liveness) and `/ready` (dependency checks — stubbed now, extended as Postgres/Redis are added) endpoints."
@@ -185,7 +185,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 3 | 🟡 In progress |
+| 0 — Foundations | 8 | 4 | 🟡 In progress |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -202,4 +202,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.3 complete — pino structured logging + correlation-id request logging._
+_Last updated: Task 0.4 complete — app factory, AppError, centralized error handler & 404._
