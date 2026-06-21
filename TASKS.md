@@ -26,10 +26,10 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **What was done:** Created `package.json` (Express + zod + pino; tsx/vitest/eslint dev deps; scripts: dev/build/start/worker/typecheck/lint/test), `tsconfig.json` (ES2022, CommonJS, strict, `noUncheckedIndexedAccess`), `.gitignore`, `.env.example` (with a forward map of later-phase vars), `eslint.config.mjs` (flat config + typescript-eslint), and the module folder skeleton with `.gitkeep`s.
 - **Course update:** None yet (no teachable runtime concept). First lessons land in Task 0.8.
 
-### Task 0.2 — Config loader with env validation · ☐ Pending
+### Task 0.2 — Config loader with env validation · ✅ Done
 - **Prompt:** "Add `src/config/env.ts`: load env, validate with zod (NODE_ENV, PORT, LOG_LEVEL), fail fast with a clear error on invalid/missing config, and export a typed, frozen `env` object."
-- **What was done:** —
-- **Course update:** Lesson — *12-factor config & fail-fast validation* (problem: scattered `process.env`; options: dotenv-only vs schema validation; why zod).
+- **What was done:** Added `src/config/env.ts` — a zod schema for `NODE_ENV` (enum, default `development`), `PORT` (`z.coerce.number().int().positive().max(65535)`, default `4000`), and `LOG_LEVEL` (enum, default `info`). `loadEnv()` uses `safeParse`; on failure it prints each invalid/missing field and `process.exit(1)` (fail fast); on success it returns a `Object.freeze`'d, typed `env`. Also exports `isProduction` / `isTest`. Verified in an isolated project: `tsc --noEmit` passes, defaults resolve (4000/development/info), invalid values (`PORT=-3`, `LOG_LEVEL=loud`) print clear errors and exit 1, valid overrides work. Removed `src/config/.gitkeep`.
+- **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *12-Factor Config & Fail-Fast Validation* (wired into the app track at Task 0.8).
 
 ### Task 0.3 — Structured logging + request IDs · ☐ Pending
 - **Prompt:** "Add `src/lib/logger.ts` (pino) and `pino-http` request logging with a per-request correlation id propagated on `req`/responses."
@@ -185,7 +185,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 1 | 🟡 In progress |
+| 0 — Foundations | 8 | 2 | 🟡 In progress |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -202,4 +202,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.1 complete — project scaffolded._
+_Last updated: Task 0.2 complete — config loader with fail-fast zod validation._
