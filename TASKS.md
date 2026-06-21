@@ -41,10 +41,10 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **What was done:** Added `src/lib/AppError.ts` (typed operational error with `statusCode`/`code`/`details`/`isOperational` + static helpers: badRequest/unauthorized/forbidden/notFound/conflict/tooManyRequests/internal), `src/lib/asyncHandler.ts` (forwards async rejections to `next`), `src/middleware/notFound.ts` (unmatched routes → 404 `AppError`), `src/middleware/errorHandler.ts` (renders one envelope `{ error: { code, message, details?, requestId } }`; maps `AppError` + `ZodError`; unknown errors → 500 with message hidden when `NODE_ENV=production`; logs 5xx as error / 4xx as warn via `req.log`), and `src/app.ts` (`createApp()` factory with deliberate middleware order: httpLogger → json → [security later] → routes → notFound → errorHandler; `x-powered-by` disabled). Verified: `tsc --noEmit` passes; live run shows `/ok`→200, `/bad`→400 (BAD_REQUEST + details), `/boom`→500 (generic message in prod, real error logged), `/async`→409, `/nope`→404 — all with a `requestId`.
 - **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *App Composition & a Consistent Error Model* (wired into the app track at Task 0.8).
 
-### Task 0.5 — Health & readiness endpoints · ☐ Pending
+### Task 0.5 — Health & readiness endpoints · ✅ Done
 - **Prompt:** "Add `/health` (liveness) and `/ready` (dependency checks — stubbed now, extended as Postgres/Redis are added) endpoints."
-- **What was done:** —
-- **Course update:** Lesson — *Health vs readiness probes* (why two endpoints; k8s/LB semantics).
+- **What was done:** Added `src/modules/health/readiness.ts` — a dependency-free **check registry** (`registerReadinessCheck`, `runReadinessChecks`) that runs checks in parallel and reports per-dependency up/down. Added `src/modules/health/health.routes.ts` — `GET /health` (liveness: status/uptime/timestamp, no deps) and `GET /ready` (runs the registry; **503 `not_ready`** if any check fails, else 200 `ready`). Mounted `healthRouter` early in `createApp()` (before future auth/rate-limit). Verified: `tsc --noEmit` passes; live run shows `/health`→200, `/ready`→200 with no checks, and `/ready`→503 once a failing `redis` check is registered (with `{postgres: up, redis: down}` detail). Removed `src/modules/.gitkeep`.
+- **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Liveness vs Readiness Probes* (wired into the app track at Task 0.8).
 
 ### Task 0.6 — Server entrypoint + graceful shutdown · ☐ Pending
 - **Prompt:** "Add `src/server.ts` that starts the HTTP server and handles SIGTERM/SIGINT by draining in-flight requests before exit; wire `pnpm dev`."
@@ -185,7 +185,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 4 | 🟡 In progress |
+| 0 — Foundations | 8 | 5 | 🟡 In progress |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -202,4 +202,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.4 complete — app factory, AppError, centralized error handler & 404._
+_Last updated: Task 0.5 complete — liveness `/health` + readiness `/ready` with a pluggable check registry._

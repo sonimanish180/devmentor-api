@@ -137,3 +137,43 @@ won't catch async throws — wrap with `asyncHandler` (or migrate to Express 5).
 **Quiz idea.** *Why hide the message of an unknown 500 error in production but not an `AppError`?* →
 `AppError`s are deliberate, client-safe messages; an unknown error's message may leak internals (paths,
 DSNs, stack), so it's replaced with a generic message and only written to server logs.
+
+### Lesson (Task 0.5): Liveness vs Readiness Probes
+
+**The Problem.** Orchestrators (Kubernetes) and load balancers need to ask the service two *different*
+questions: "should I **restart** this process?" and "should I **send it traffic** right now?" A single
+`/health` that also checks the database conflates them — a brief DB blip would make the probe fail and
+the orchestrator would needlessly **kill and restart** a perfectly alive process, often making an outage
+worse.
+
+**Options on the table.**
+- *One `/health` that checks everything* — simple, but restarts on transient dependency failures; no way to "drain" gracefully.
+- *Separate liveness and readiness probes* — liveness = process alive (restart if not); readiness = dependencies OK (pull from rotation, don't kill).
+- *Readiness with a pluggable check registry* — modules register their own checks (DB, cache) as they're added, so the probe grows without edits.
+
+**Decision & Why.** Expose **`/health` (liveness)** — dependency-free, always answers while the event
+loop runs — and **`/ready` (readiness)** — runs a **registry** of dependency checks and returns **503**
+when any is down so the LB removes the instance from rotation without restarting it. The registry keeps
+the health module dependency-free; Postgres (Phase 1) and Redis (Phase 4) will `registerReadinessCheck`.
+
+**Implementation.**
+```ts
+// readiness.ts — modules push their own checks
+registerReadinessCheck({ name: 'postgres', check: async () => { await db.query('SELECT 1'); } });
+
+// health.routes.ts
+router.get('/health', (_q, res) => res.json({ status: 'ok', uptimeSeconds, timestamp }));
+router.get('/ready', async (_q, res) => {
+  const { healthy, checks } = await runReadinessChecks();
+  res.status(healthy ? 200 : 503).json({ status: healthy ? 'ready' : 'not_ready', checks });
+});
+```
+Mounted **early** in `createApp()` so probes stay unauthenticated and outside rate limiting.
+
+**Pitfalls.** Don't put dependency checks in liveness — a flaky DB shouldn't trigger restarts. Readiness
+must return a non-2xx (503) when unhealthy, not 200 with a flag, so the LB acts on the status code. Keep
+probes cheap (no heavy queries) since they run frequently. Leave them unauthenticated and un-rate-limited.
+
+**Quiz idea.** *Your DB has a 5-second blip. Which probe should fail, and what happens?* → `/ready` fails
+(503) so the load balancer stops sending traffic; `/health` stays 200 so the process is **not** restarted,
+and traffic resumes automatically once the DB recovers.

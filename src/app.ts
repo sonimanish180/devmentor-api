@@ -1,5 +1,6 @@
 import express, { type Express } from 'express';
 import { httpLogger } from './middleware/httpLogger';
+import { healthRouter } from './modules/health/health.routes';
 import { notFoundHandler } from './middleware/notFound';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -22,6 +23,10 @@ export function createApp(): Express {
 
   app.use(httpLogger);
   app.use(express.json());
+
+  // Health/readiness probes — mounted early so they stay unauthenticated and
+  // outside any rate limiting added later.
+  app.use(healthRouter);
 
   // --- Security middleware mounts here in Phase 3 (helmet, CORS, rate limiting) ---
   // --- Feature routers mount here in later phases, e.g. app.use('/api/v1', apiRouter) ---
