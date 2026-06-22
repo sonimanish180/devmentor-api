@@ -417,3 +417,44 @@ well) — keep those as real columns.
 → The structure must be queried, ordered and paginated (needs columns, FKs, indexes), while content shape
 varies and evolves — JSONB lets content change without a migration, and the normalized tree keeps the
 catalog queryable with referential integrity.
+
+### Lesson (Task 1.4): Migrations & Idempotent Seeding
+
+**The Problem.** The schema will change many times, across many machines, CI, and production. Applying
+changes by hand-running SQL drifts environments and isn't repeatable or reviewable. And a freshly-migrated
+database is **empty** — developers need realistic sample data to work against without hand-entering rows.
+
+**Options on the table.**
+- *Hand-written SQL migrations* — full control, but you author/order them manually and they're easy to get wrong.
+- *`prisma db push`* — fast schema sync for prototyping, but keeps **no migration history** (bad for teams/prod).
+- *`prisma migrate`* — generates versioned, committed migration files from the schema; deterministic across environments. (chosen)
+- For data: *manual inserts* vs an **idempotent seed script** (upserts). (chose seed script)
+
+**Decision & Why.** Use **`prisma migrate`**: `migrate dev` in development generates a timestamped migration
+(committed to git) and applies it; `migrate deploy` applies the exact same committed migrations in CI/prod
+**without prompts or resets**. A **seed script** (`prisma/seed.ts`, wired via `package.json` → `prisma.seed`)
+populates sample data using **upserts**, so it's **idempotent** — re-running converges instead of duplicating.
+
+**Implementation.**
+```bash
+pnpm db:migrate         # dev: create + apply a migration (prompts, may reset)
+pnpm db:seed            # run prisma/seed.ts (idempotent upserts)
+pnpm db:deploy          # prod/CI: apply committed migrations, no prompts/reset
+```
+```ts
+// every seed write is an upsert keyed on a unique field => safe to re-run
+await prisma.course.upsert({
+  where: { slug: 'sample-backend' },
+  update: { title: 'Sample Backend Course' },
+  create: { slug: 'sample-backend', title: 'Sample Backend Course', description: '…', published: true },
+});
+```
+
+**Pitfalls.** **Never edit a migration that's already been applied/shared** — create a new one (editing it
+desyncs everyone's history). Use `migrate dev` only locally (it can **reset** the database); production must
+use `migrate deploy`. **Commit the `prisma/migrations/` folder** — it *is* the history. Make seeds idempotent
+(upsert, not create) or re-running explodes with duplicate/unique errors.
+
+**Quiz idea.** *Why use `migrate deploy` in production instead of `migrate dev`?* → `migrate deploy` applies
+the already-committed migrations deterministically with no prompts and never resets data, whereas `migrate
+dev` is interactive and may reset the database — safe for local dev, dangerous for prod.
