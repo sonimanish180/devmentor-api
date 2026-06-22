@@ -24,7 +24,10 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  stats UserStats?
+  stats       UserStats?
+  enrollments Enrollment[]
+  completions LessonCompletion[]
+  quizScores  QuizScore[]
 }
 
 model UserStats {
@@ -37,4 +40,109 @@ model UserStats {
   currentModule  String?
   currentLesson  String?
   updatedAt      DateTime  @updatedAt
+}
+
+// ─── Course catalog ───────────────────────────────────────────────────────
+// Structure (Course → Module → Lesson) is normalized so we can query, order,
+// and paginate it. Each Lesson's actual teaching content is a flexible JSONB
+// `blocks` array (headings, paragraphs, code, callouts…), so authoring new
+// content shapes never requires a schema migration. Per-user progress
+// (enrollment, completions, quiz scores) references these by id.
+
+enum Level {
+  beginner
+  intermediate
+  senior
+}
+
+model Course {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  description String
+  icon        String?
+  color       String?
+  order       Int      @default(0)
+  published   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  modules     Module[]
+  enrollments Enrollment[]
+}
+
+model Module {
+  id          String   @id @default(cuid())
+  courseId    String
+  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  slug        String
+  title       String
+  description String?
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  lessons Lesson[]
+
+  @@unique([courseId, slug]) // slug unique within a course
+  @@index([courseId])
+}
+
+model Lesson {
+  id          String   @id @default(cuid())
+  moduleId    String
+  module      Module   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  slug        String
+  title       String
+  level       Level    @default(beginner)
+  duration    String?
+  xp          Int      @default(0)
+  description String?
+  blocks      Json // structured content blocks (JSONB)
+  quiz        Json? // array of quiz questions (JSONB)
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  completions LessonCompletion[]
+  quizScores  QuizScore[]
+
+  @@unique([moduleId, slug])
+  @@index([moduleId])
+}
+
+model Enrollment {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courseId   String
+  course     Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  enrolledAt DateTime @default(now())
+
+  @@unique([userId, courseId]) // a user enrolls in a course at most once
+  @@index([courseId])
+}
+
+model LessonCompletion {
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId    String
+  lesson      Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  completedAt DateTime @default(now())
+
+  @@id([userId, lessonId]) // composite PK => completed once, idempotent upsert
+  @@index([lessonId])
+}
+
+model QuizScore {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId  String
+  lesson    Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  bestScore Int
+  attempts  Int      @default(1)
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, lessonId])
+  @@index([lessonId])
 }

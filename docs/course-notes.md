@@ -364,3 +364,56 @@ maintained by Prisma — don't set it by hand.
 **Quiz idea.** *Why store XP/streak in a separate `UserStats` table instead of columns on `User`?* → To
 isolate frequently-updated, derived counters from the stable identity record — keeping `User` lean and
 avoiding rewriting identity rows on every progress change (and keeping concerns separated).
+
+### Lesson (Task 1.3): Normalized Structure + JSONB Content + Progress Join Tables
+
+**The Problem.** DevMentor has many courses with deep content. We need to **query, order and paginate** the
+catalog structure (courses → modules → lessons), but each lesson's actual content is a **varied, evolving**
+sequence of blocks (headings, paragraphs, code, callouts, diagrams…). Modeling every block as columns/rows
+means a migration every time we add a block type. We also must track **per-user progress** without
+duplicating content or double-counting.
+
+**Options on the table.**
+- *Fully normalized (each block its own row/table)* — great for SQL queries, but heavy joins and a migration for every new block shape.
+- *Fully document (store the whole course as one JSON blob)* — totally flexible, but you lose ordering/filtering/pagination at the DB level and all referential integrity.
+- *Hybrid: normalize the structure, store lesson content as JSONB* — query/order/paginate the tree, keep content flexible. (chosen)
+
+**Decision & Why.** **Normalize** `Course → Module → Lesson` (FKs, ordering, unique slugs per parent,
+indexed) so the catalog is queryable and paginable, but store each lesson's `blocks` and `quiz` as **JSONB**
+so new content shapes need **no migration**. Per-user progress is thin **join tables** — `LessonCompletion`
+and `QuizScore` — that reference lessons by id and use **composite primary keys** (`@@id([userId, lessonId])`),
+which makes writes **idempotent** (upsert / `ON CONFLICT DO NOTHING`): completing a lesson twice can't create
+duplicates or double-award XP (this directly sets up Phase 5's concurrency work).
+
+**Implementation.**
+```prisma
+model Lesson {
+  id       String @id @default(cuid())
+  moduleId String
+  module   Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  slug     String
+  level    Level  @default(beginner)
+  blocks   Json   // content blocks (JSONB) — evolves without migrations
+  quiz     Json?  // quiz questions (JSONB)
+  @@unique([moduleId, slug])
+  @@index([moduleId])
+}
+
+model LessonCompletion {
+  userId   String
+  lessonId String
+  completedAt DateTime @default(now())
+  @@id([userId, lessonId]) // idempotent: one completion per (user, lesson)
+}
+```
+
+**Pitfalls.** JSONB is **opaque to SQL constraints** — validate the block shape in the app (zod) before
+writing, since the DB won't. **Index foreign keys** (and columns you filter/sort on) or large-catalog
+queries table-scan. The **composite PK** on progress tables is what gives idempotency — without it,
+double-clicks duplicate rows. Don't push query/filter fields *into* JSON (you can't index/filter them
+well) — keep those as real columns.
+
+**Quiz idea.** *Why store lesson `blocks` as JSONB but keep `Course/Module/Lesson` structure normalized?*
+→ The structure must be queried, ordered and paginated (needs columns, FKs, indexes), while content shape
+varies and evolves — JSONB lets content change without a migration, and the normalized tree keeps the
+catalog queryable with referential integrity.
