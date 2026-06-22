@@ -458,3 +458,47 @@ use `migrate deploy`. **Commit the `prisma/migrations/` folder** — it *is* the
 **Quiz idea.** *Why use `migrate deploy` in production instead of `migrate dev`?* → `migrate deploy` applies
 the already-committed migrations deterministically with no prompts and never resets data, whereas `migrate
 dev` is interactive and may reset the database — safe for local dev, dangerous for prod.
+
+### Lesson (Task 1.5): Pagination at Scale (Keyset) & the N+1 Problem
+
+**The Problem.** With a large catalog, two performance traps appear. (1) Returning all rows is unbounded;
+the obvious fix, `OFFSET n` pagination, gets **slower the deeper you page** (the DB counts and discards n
+rows every time) and can **skip or repeat** rows when data changes mid-paging. (2) Loading nested data
+naively — fetch courses, then loop and query each course's modules/lessons — fires **1 + N** queries: the
+**N+1 problem**, which quietly destroys latency as N grows.
+
+**Options on the table.**
+- *Pagination:* offset (`skip`/`OFFSET`) — simple, but slow at depth and unstable; **keyset/cursor** — remember the last ordered key and fetch rows after it: O(limit) at any depth, stable. (chose keyset)
+- *Relations:* loop-and-query (N+1) — easy, terrible; **`include`/join** — one batched query; DataLoader — for GraphQL-style batching. (chose `include`)
+
+**Decision & Why.** **Keyset pagination**: order by a unique, stable column, encode the last row's key as
+an **opaque base64url cursor**, fetch **`limit + 1`** rows to know if a next page exists (no extra COUNT),
+and **cap** the page size so a client can't request everything. Fetch nested relations with a single
+**`include`** query (with `orderBy`), and use **`select`** to omit heavy JSONB (`blocks`) from list views.
+A **repository layer** keeps all this query shape — and its performance characteristics — in one place.
+
+**Implementation.**
+```ts
+// keyset: fetch limit+1, cursor = last id
+const { limit, take, cursorId } = keysetParams(params);
+const rows = await prisma.course.findMany({
+  where: { published: true },
+  orderBy: { id: 'asc' },
+  take,
+  ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+});
+return buildPage(rows, limit, (c) => c.id); // -> { items, nextCursor, hasMore }
+
+// avoid N+1: one query with nested includes instead of looping
+prisma.course.findUnique({ where: { slug }, include: { modules: { include: { lessons: true } } } });
+```
+
+**Pitfalls.** Offset pagination is fine for small/shallow lists but degrades at depth — prefer keyset for
+large or infinite-scroll data. The cursor column must be **unique, stable, and the one you order by** (id
+works; a non-unique column needs a tiebreaker). Always **cap** `limit`. N+1 hides anywhere you call the DB
+**inside a loop** — pull related data with `include`/a single query. Don't over-fetch heavy columns; `select`
+only what a list needs.
+
+**Quiz idea.** *What is the N+1 problem and how does `include` fix it?* → Fetching a list (1 query) then
+issuing one query per row for its relations (N queries) = N+1 round-trips. `include` (a join/batched query)
+fetches the parents and their relations together in a single query.
