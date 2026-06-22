@@ -1,0 +1,12 @@
+// Prisma schema — the single source of truth for the database.
+// Models are added in Tasks 1.2 (User, UserStats) and 1.3 (Course, Module,
+// Lesson, Enrollment, progress). This task (1.1) establishes the connection.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

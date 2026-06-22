@@ -263,3 +263,54 @@ out of the build context (smaller, safer images).
 container starts?* → The container being "up" only means the process launched; Postgres needs a moment to
 accept connections. A healthcheck reports true readiness, so dependents can wait on `service_healthy`
 instead of crashing on a connection-refused race at boot.
+
+---
+
+## Phase 1 — Data Modeling & Persistence
+
+### Lesson (Task 1.1): Connecting to Postgres with Prisma (the client singleton)
+
+**The Problem.** The service needs durable storage. Talking to Postgres with the raw `pg` driver means
+hand-writing SQL strings (untyped, injection-prone, no migrations) and manually managing a connection
+pool. We also need the database to participate in readiness (don't take traffic if the DB is down) and to
+close cleanly on shutdown — and in dev, `tsx watch` reloads modules, which can silently create a new DB
+connection pool on every file save.
+
+**Options on the table.**
+- *Raw `pg` driver* — full control, but verbose, untyped, and you build migrations/pooling yourself.
+- *Query builder (Knex)* — less SQL string-building, still largely untyped, migrations are manual-ish.
+- *ORM — Prisma* — typed client generated from a schema, first-class migrations, readable queries. (chosen)
+  *(SQL vs NoSQL and the normalized-vs-JSONB modeling decision are recorded in ADR-0002 at Task 1.6.)*
+
+**Decision & Why.** Use **Prisma** on Postgres: a typed client generated from `schema.prisma`, with
+`prisma migrate` for versioned schema changes. Expose a **singleton `PrismaClient`** (one connection pool),
+cached on `globalThis` in dev so hot-reload doesn't leak pools. Register a **readiness check**
+(`SELECT 1`) and a **shutdown hook** (`$disconnect`) so the DB is wired into the app's lifecycle.
+
+**Implementation.**
+```ts
+// prisma/schema.prisma
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+generator  client { provider = "prisma-client-js" }
+
+// src/lib/prisma.ts — one client, cached in dev, wired into health + shutdown
+const g = globalThis as unknown as { prisma?: PrismaClient };
+export const prisma = g.prisma ?? new PrismaClient({ log: ['warn', 'error'] });
+if (!isProduction) g.prisma = prisma;
+
+export function registerPrismaHooks() {
+  registerReadinessCheck({ name: 'postgres', check: async () => { await prisma.$queryRaw`SELECT 1`; } });
+  onShutdown('prisma', () => prisma.$disconnect());
+}
+```
+`DATABASE_URL` is now a **required** env var (the service is DB-backed), so a missing/invalid URL fails
+fast at boot (Lesson 0.2).
+
+**Pitfalls.** Creating a `new PrismaClient()` per request/module **exhausts Postgres connections** — always
+share one. Without the `globalThis` cache, `tsx watch` (and Next.js dev) leak a client per reload. You must
+run `prisma generate` before the typed client exists (and after every schema change); it's wired as
+`db:generate`. Readiness uses a *cheap* `SELECT 1`, not a real query.
+
+**Quiz idea.** *Why expose a single shared PrismaClient instead of creating one where needed?* → Each
+client owns a connection pool; multiple clients multiply open connections and exhaust Postgres. A singleton
+(cached on `globalThis` in dev to survive hot-reload) keeps the pool bounded.

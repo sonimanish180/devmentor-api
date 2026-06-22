@@ -1,6 +1,7 @@
 import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './lib/logger';
+import { registerPrismaHooks } from './lib/prisma';
 import { runShutdownHooks } from './lib/shutdown';
 
 /**
@@ -16,6 +17,8 @@ import { runShutdownHooks } from './lib/shutdown';
  * instance, which is essential for zero-downtime deploys.
  */
 const FORCE_EXIT_MS = 10_000;
+
+registerPrismaHooks(); // DB readiness check + graceful disconnect
 
 const app = createApp();
 const server = app.listen(env.PORT, () => {
