@@ -19,7 +19,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 ---
 
-## Phase 0 — Foundations & Project Setup  · 🟡 In progress
+## Phase 0 — Foundations & Project Setup  · ✅ Complete
 
 ### Task 0.1 — Initialize the project · ✅ Done
 - **Prompt:** "Create `devmentor-api` baseline: `package.json` (pnpm + scripts), `tsconfig.json` (strict, CommonJS), `.gitignore`, `.env.example`, `eslint.config.mjs`, and the `src/{config,lib,middleware,modules,events}` + `tests` + `docs/adr` folder skeleton."
@@ -57,10 +57,10 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **Verification note:** Compose YAML validated (services, healthchecks, volumes parsed OK). **Docker isn't available in the build sandbox**, so `docker compose up` must be confirmed green on the host: `docker compose up -d && docker compose ps` → both `healthy`.
 - **Course update:** ✅ Lesson drafted in `docs/course-notes.md` → *Reproducible Local Environments with Docker Compose* (wired into the app track at Task 0.8).
 
-### Task 0.8 — ADR-0001 + create the course track · ☐ Pending
+### Task 0.8 — ADR-0001 + create the course track · ✅ Done
 - **Prompt:** "Write `docs/adr/0001-foundational-stack.md` (Express+TS, CommonJS, pnpm, modular monolith — problem/options/decision/consequences). Create `devmentor/src/data/backend-build-curriculum.ts` with the Phase 0 module (intro + the lessons above), register it in `curriculum.ts` + a home-page tab + `/docs` if relevant. Update README tracker + ADR index. `tsc --noEmit` clean."
-- **What was done:** —
-- **Course update:** Creates the track + Phase 0 module.
+- **What was done:** Wrote `docs/adr/0001-foundational-stack.md` (Express+TS, CommonJS, pnpm, modular monolith — full problem/options/decision/consequences). Created the **"Build a Scalable Backend (0 → 1)"** track at `devmentor/src/data/backend-build-curriculum.ts` — module `bb-foundations` with **7 lessons** (intro + config, logging, error model, health/readiness, graceful shutdown, Docker) authored from `docs/course-notes.md` in the Problem → Options → Decision → Implementation → Pitfalls → Quiz shape (10 quiz questions, ~510 XP). Registered in `curriculum.ts` (`allModules`) and the home page (new **Backend 0→1** tab + track section + stats/track count). Updated README phase tracker (Phase 0 ✅) + ADR index (ADR-0001). Verified `tsc --noEmit` passes in `devmentor`. **Phase 0 complete (8/8).**
+- **Course update:** ✅ Track created + Phase 0 module live in the app.
 
 ---
 
@@ -186,7 +186,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
-| 0 — Foundations | 8 | 7 | 🟡 In progress |
+| 0 — Foundations | 8 | 8 | ✅ Complete |
 | 1 — Data modeling | 6 | 0 | ☐ |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 0.7 complete — docker-compose (Postgres + Redis, healthchecked), dev Dockerfile & .dockerignore._
+_Last updated: Task 0.8 complete — ADR-0001 + "Build a Scalable Backend (0 → 1)" course track live in DevMentor. **Phase 0 complete.** Next: Phase 1 — Data Modeling & Persistence._
