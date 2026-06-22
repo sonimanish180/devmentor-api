@@ -66,7 +66,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 ## Phase 1 — Data Modeling & Persistence · 🟡 In progress
 - **1.1** ✅ **Done** — Add Prisma, datasource, connect to Postgres; `pnpm prisma` scripts. *What was done:* added `@prisma/client`/`prisma` deps + `db:generate`/`db:migrate`/`db:deploy`/`db:studio`/`prisma` scripts; `prisma/schema.prisma` (postgresql datasource + client generator, no models yet); `src/lib/prisma.ts` (singleton `PrismaClient` cached on `globalThis` in dev, `registerPrismaHooks()` adding a `SELECT 1` readiness check + `$disconnect` shutdown hook); made `DATABASE_URL` a required env var; activated it in `.env.example`; wired `registerPrismaHooks()` into `server.ts`. **Verify:** `tsc --noEmit` passes. ⚠️ Prisma engine binaries are blocked in the build sandbox, so run on host: `pnpm install && docker compose up -d && pnpm db:generate` then start the server and confirm `GET /ready` reports `postgres: up`. → *Lesson captured: choosing Prisma; the client singleton.*
-- **1.2** Schema: `User`, `UserStats`. → *Lesson: modeling users & derived stats.*
+- **1.2** ✅ **Done** — Schema: `User`, `UserStats`. *What was done:* added `User` (cuid id, unique `email`, optional `name`, `createdAt`/`updatedAt`) and `UserStats` as a **1:1** (`userId @id` + relation, `onDelete: Cascade`) holding `totalXP`/`streak`/`lastActiveDate`/`currentModule`/`currentLesson`/`updatedAt`; back-relation `stats UserStats?` on `User`. **Verify:** structural check passed (balanced braces, unique email, PK=FK 1:1, cascade, back-relation). ⚠️ Prisma engines blocked in sandbox — validate via `pnpm db:migrate` on host (creates the migration). → *Lesson captured: modeling users & derived stats (1:1).*
 - **1.3** Schema: `Course`, `Module`, `Lesson` (JSONB content blocks), `Enrollment`, `LessonCompletion`, `QuizScore`. → *Lesson: normalized core + JSONB for flexible content.*
 - **1.4** Migrations + seed script (sample courses/lessons). → *Lesson: migrations & seeding.*
 - **1.5** Repository layer + keyset pagination helper. → *Lesson: the N+1 problem & pagination at scale.*
@@ -187,7 +187,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
 | 0 — Foundations | 8 | 8 | ✅ Complete |
-| 1 — Data modeling | 6 | 1 | 🟡 In progress |
+| 1 — Data modeling | 6 | 2 | 🟡 In progress |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
 | 4 — Caching (Redis) | 5 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 1.1 complete — Prisma + Postgres datasource, client singleton, DB readiness + disconnect hooks (Phase 0 complete; Phase 1 underway)._
+_Last updated: Task 1.2 complete — User + UserStats (1:1, cascade) models added to the Prisma schema._

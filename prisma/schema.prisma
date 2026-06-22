@@ -10,3 +10,31 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// ─── Identity & progress ──────────────────────────────────────────────────
+// A user's stable identity lives on User. Their frequently-updated, derived
+// progress counters live in a separate 1:1 UserStats row, so the identity
+// record stays lean and we don't churn it on every XP change. Auth fields
+// (password hash, refresh tokens) are added in Phase 3.
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stats UserStats?
+}
+
+model UserStats {
+  // Shares User's primary key — the hallmark of a 1:1 relation.
+  userId         String    @id
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totalXP        Int       @default(0)
+  streak         Int       @default(0)
+  lastActiveDate DateTime?
+  currentModule  String?
+  currentLesson  String?
+  updatedAt      DateTime  @updatedAt
+}

@@ -314,3 +314,53 @@ run `prisma generate` before the typed client exists (and after every schema cha
 **Quiz idea.** *Why expose a single shared PrismaClient instead of creating one where needed?* → Each
 client owns a connection pool; multiple clients multiply open connections and exhaust Postgres. A singleton
 (cached on `globalThis` in dev to survive hot-reload) keeps the pool bounded.
+
+### Lesson (Task 1.2): Modeling Users & Derived Stats (1:1 relations)
+
+**The Problem.** A user has a **stable identity** (email, name, created date) and also **derived,
+frequently-changing progress** (XP, streak, current lesson). If we cram both into one `User` row, every XP
+tick rewrites the identity record, mixes concerns, and makes the "core" table hot and wide. Where should
+mutable stats live?
+
+**Options on the table.**
+- *All columns on `User`* — simplest, but churns identity rows on every progress change and bloats the table.
+- *A separate `UserStats` table, 1:1 with `User`* — isolates hot, mutable counters from stable identity; clean separation. (chosen)
+- *A JSON blob on `User`* — flexible, but you lose typed columns, constraints, and easy aggregate queries.
+
+**Decision & Why.** Keep **`User`** lean (identity only) and put progress in a **`UserStats`** row that
+**shares User's primary key** (`userId @id` + relation) — the canonical way to model 1:1 in a relational DB.
+`onDelete: Cascade` means deleting a user removes their stats automatically. IDs are **cuid** (not
+auto-increment ints): collision-resistant, non-guessable, and safe to generate client/distributed-side
+without leaking row counts.
+
+**Implementation.**
+```prisma
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  stats     UserStats?
+}
+
+model UserStats {
+  userId         String    @id                                   // PK == FK => 1:1
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totalXP        Int       @default(0)
+  streak         Int       @default(0)
+  lastActiveDate DateTime?
+  currentModule  String?
+  currentLesson  String?
+  updatedAt      DateTime  @updatedAt
+}
+```
+
+**Pitfalls.** A 1:1 is modeled by making the dependent's **primary key also the foreign key** — not a
+plain extra column. Set `onDelete: Cascade` or you'll orphan stats rows. Prefer **cuid/uuid** over
+auto-increment integers for public ids (don't leak counts, don't collide across shards). `@updatedAt` is
+maintained by Prisma — don't set it by hand.
+
+**Quiz idea.** *Why store XP/streak in a separate `UserStats` table instead of columns on `User`?* → To
+isolate frequently-updated, derived counters from the stable identity record — keeping `User` lean and
+avoiding rewriting identity rows on every progress change (and keeping concerns separated).
