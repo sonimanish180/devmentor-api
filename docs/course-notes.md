@@ -587,3 +587,44 @@ shouldn't (mass-assignment).
 **Quiz idea.** *Why is `limit` defined with `z.coerce.number()` in a query DTO?* → Query-string values are
 always strings (`"25"`); coercion turns it into a validated, bounded number so the handler receives the
 right type without manual parsing.
+
+### Lesson (Task 2.3): Serving the Catalog — Layered Endpoints
+
+**The Problem.** Where should logic live? If a route handler parses the request, applies business rules,
+*and* runs SQL, it becomes a tangled, untestable blob — and rules (like "only published courses are
+visible") get duplicated or forgotten. We also must not **leak the existence** of unpublished/private
+resources, and list endpoints must stay bounded.
+
+**Options on the table.**
+- *Everything in the route handler* — fast to write, impossible to test or reuse, rules scattered.
+- *Layered: controller → service → repository* — each layer one job; testable; rules in one place. (chosen)
+
+**Decision & Why.** Three thin layers per feature: the **controller** is an HTTP adapter (read the
+already-validated request, call the service, send JSON — no logic); the **service** holds business rules
+(published-only visibility, translate "missing" into a 404 domain error); the **repository** owns Prisma
+queries (keyset pagination, N+1-safe `include`). The list endpoint returns the keyset envelope
+`{ items, nextCursor, hasMore }`, and an unpublished **or** absent course both return the **same 404** so we
+don't reveal which courses exist. Each endpoint registers itself into the OpenAPI contract.
+
+**Implementation.**
+```ts
+// route: validate at the edge, then delegate
+courseRouter.get('/', validate({ query: paginationQuery }), courseController.listCourses);
+courseRouter.get('/:slug', validate({ params: courseSlugParams }), courseController.getCourse);
+
+// controller (thin) -> service (rules) -> repository (Prisma)
+export async function getCourse(slug: string) {
+  const course = await getCourseBySlug(slug);
+  if (!course || !course.published) throw AppError.notFound('Course not found: ' + slug); // don't leak existence
+  return course;
+}
+```
+
+**Pitfalls.** Keep controllers free of business logic and DB calls — otherwise the layering is fake. Return
+the **same 404** for "doesn't exist" and "exists but you can't see it" (a 403 or an empty 200 leaks
+information). Always paginate list endpoints (never `findMany()` unbounded). Register each endpoint in
+OpenAPI as you add it so the contract stays truthful.
+
+**Quiz idea.** *Why return 404 (not 403 or an empty result) when a course exists but isn't published?* →
+To avoid leaking existence — distinguishing "not found" from "forbidden" tells a client the resource is
+real. A uniform 404 reveals nothing about hidden resources.

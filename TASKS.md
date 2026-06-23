@@ -75,7 +75,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 ## Phase 2 — API Design & Validation · 🟡 In progress
 - **2.1** ✅ **Done** — REST conventions, `/api/v1` router mounting, OpenAPI setup. *What was done:* added `src/api/openapi.ts` (base OpenAPI 3.0.3 document with the shared `Error` schema + `registerPath` helper) and `src/api/router.ts` (versioned `apiRouter`: `GET /` discovery, `GET /openapi.json` contract, `GET /docs` Redoc UI from CDN — no new deps; documented REST conventions); mounted at `/api/v1` in `createApp()`. **Verify:** `tsc --noEmit` passes; live run — `/api/v1` 200 meta, `/api/v1/openapi.json` 200 (Error schema present), `/api/v1/docs` 200 html, unknown route 404 via the shared envelope with `requestId`. → *Lesson captured: versioned REST surface & the OpenAPI contract.*
 - **2.2** ✅ **Done** — zod validation middleware + DTO pattern. *What was done:* added `src/middleware/validate.ts` (a `validate({ body?, query?, params? })` factory that parses all three in one pass for full error reporting, coerces and writes values back, and forwards failures to the error handler as 400 `VALIDATION_ERROR`); added `src/api/schemas.ts` with the `paginationQuery` DTO (`z.coerce.number().max(100)`) + inferred `PaginationQuery` type. **Verify:** `tsc --noEmit` passes; live run — valid POST coerced `age "30"→30` (number), invalid POST → 400 with both field errors, `?limit=25`→ number 25, `?limit=999`→ 400 (max 100). → *Lesson captured: validate at the edge & the DTO pattern.*
-- **2.3** Course catalog endpoints (list/detail) with pagination + filtering. → *Lesson: serving large catalogs.*
+- **2.3** ✅ **Done** — Course catalog endpoints (list/detail) with pagination + filtering. *What was done:* added the layered course module — `course.service.ts` (business rules: published-only, 404 for missing/unpublished without leaking existence), `course.controller.ts` (thin HTTP adapters), `course.schema.ts` (`courseSlugParams` DTO), `course.openapi.ts` (registers `/courses` + `/courses/{slug}` into the contract), `course.routes.ts` (`GET /` keyset-paginated via `paginationQuery`, `GET /:slug`); mounted at `/api/v1/courses` in `api/router.ts`. **Verify:** prisma-free files typecheck; OpenAPI registration confirmed at runtime (`/courses` w/ cursor+limit params + Error-referencing 400, `/courses/{slug}`); all DB-touching files syntax-check (esbuild). ⚠️ Full typecheck + live endpoints on host after `pnpm db:generate` (then `GET /api/v1/courses`). → *Lesson captured: serving the catalog — layered endpoints.*
 - **2.4** Lesson content endpoints. → *Lesson: content delivery shape.*
 - **2.5** Error envelope, 404 / method-not-allowed, versioning. → *Lesson: consistent API contracts.*
 - **2.6** **ADR-0003** (REST chosen) + Phase 2 course module + trackers.
@@ -188,7 +188,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 |---|---|---|---|
 | 0 — Foundations | 8 | 8 | ✅ Complete |
 | 1 — Data modeling | 6 | 6 | ✅ Complete |
-| 2 — API design | 6 | 2 | 🟡 In progress |
+| 2 — API design | 6 | 3 | 🟡 In progress |
 | 3 — Auth & security | 7 | 0 | ☐ |
 | 4 — Caching (Redis) | 5 | 0 | ☐ |
 | 5 — Concurrency | 6 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 2.2 complete — zod validate middleware (one-pass body/query/params, coercion) + pagination DTO._
+_Last updated: Task 2.3 complete — course catalog endpoints (layered controller/service/repository) mounted at /api/v1/courses._
