@@ -83,7 +83,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | # | Phase | Status | ADR | Course lesson | PR(s) |
 |---|---|---|---|---|---|
 | 0 | Foundations & project setup | ✅ | [0001](./docs/adr/0001-foundational-stack.md) | [Phase 0 module](../devmentor/src/data/backend-build-curriculum.ts) (7 lessons) | — |
-| 1 | Data modeling & persistence | ⬜ | — | — | — |
+| 1 | Data modeling & persistence | ✅ | [0002](./docs/adr/0002-postgres-prisma-data-modeling.md) | [Phase 1 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
 | 2 | API design & validation | ⬜ | — | — | — |
 | 3 | Authentication & security | ⬜ | — | — | — |
 | 4 | Caching & read performance (Redis) | ⬜ | — | — | — |
@@ -110,6 +110,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | ADR | Title | Phase | Status |
 |---|---|---|---|
 | [0001](./docs/adr/0001-foundational-stack.md) | Foundational stack & project shape | 0 | Accepted |
+| [0002](./docs/adr/0002-postgres-prisma-data-modeling.md) | PostgreSQL + Prisma, normalized + JSONB | 1 | Accepted |
 
 ---
 

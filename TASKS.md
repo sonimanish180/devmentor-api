@@ -64,13 +64,13 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 
 ---
 
-## Phase 1 — Data Modeling & Persistence · 🟡 In progress
+## Phase 1 — Data Modeling & Persistence · ✅ Complete
 - **1.1** ✅ **Done** — Add Prisma, datasource, connect to Postgres; `pnpm prisma` scripts. *What was done:* added `@prisma/client`/`prisma` deps + `db:generate`/`db:migrate`/`db:deploy`/`db:studio`/`prisma` scripts; `prisma/schema.prisma` (postgresql datasource + client generator, no models yet); `src/lib/prisma.ts` (singleton `PrismaClient` cached on `globalThis` in dev, `registerPrismaHooks()` adding a `SELECT 1` readiness check + `$disconnect` shutdown hook); made `DATABASE_URL` a required env var; activated it in `.env.example`; wired `registerPrismaHooks()` into `server.ts`. **Verify:** `tsc --noEmit` passes. ⚠️ Prisma engine binaries are blocked in the build sandbox, so run on host: `pnpm install && docker compose up -d && pnpm db:generate` then start the server and confirm `GET /ready` reports `postgres: up`. → *Lesson captured: choosing Prisma; the client singleton.*
 - **1.2** ✅ **Done** — Schema: `User`, `UserStats`. *What was done:* added `User` (cuid id, unique `email`, optional `name`, `createdAt`/`updatedAt`) and `UserStats` as a **1:1** (`userId @id` + relation, `onDelete: Cascade`) holding `totalXP`/`streak`/`lastActiveDate`/`currentModule`/`currentLesson`/`updatedAt`; back-relation `stats UserStats?` on `User`. **Verify:** structural check passed (balanced braces, unique email, PK=FK 1:1, cascade, back-relation). ⚠️ Prisma engines blocked in sandbox — validate via `pnpm db:migrate` on host (creates the migration). → *Lesson captured: modeling users & derived stats (1:1).*
 - **1.3** ✅ **Done** — Schema: `Course`, `Module`, `Lesson` (JSONB content blocks), `Enrollment`, `LessonCompletion`, `QuizScore`. *What was done:* normalized `Course → Module → Lesson` (cuid ids, `@@unique([courseId,slug])`/`@@unique([moduleId,slug])`, FK indexes, `order`, `published`); `Lesson.blocks` + `Lesson.quiz` as **JSONB**; `Level` enum; progress join tables `LessonCompletion` & `QuizScore` with **composite PKs** (`@@id([userId,lessonId])`) for idempotent upserts; back-relations added to `User`; cascade deletes throughout. **Verify:** structural relation/back-relation consistency check passed (8 models, 2 composite PKs, 3 `@@unique`, JSONB blocks/quiz, 9 cascades). ⚠️ Prisma engines blocked in sandbox — validate via `pnpm db:migrate` on host. → *Lesson captured: normalized structure + JSONB content + progress join tables.*
 - **1.4** ✅ **Done** — Migrations + seed script (sample courses/lessons). *What was done:* added `prisma/seed.ts` — an **idempotent** seed (all upserts) creating a demo user + stats, a published `sample-backend` course → `foundations` module → two JSONB-content lessons (+quiz), an enrollment, a lesson completion, and a quiz score (exercises every table incl. composite-PK upserts). Wired seeding via `package.json` `prisma.seed` + `db:seed` script. **Verify:** package.json valid (seed config present); `seed.ts` transpiles cleanly (esbuild, `@prisma/client` external). ⚠️ Run on host: `pnpm db:migrate` (creates/applies the first migration) then `pnpm db:seed`. → *Lesson captured: migrations & idempotent seeding.*
 - **1.5** ✅ **Done** — Repository layer + keyset pagination helper. *What was done:* added `src/lib/pagination.ts` (keyset/cursor pagination — opaque base64url cursor, `normalizeLimit` capped at 100/default 20, `keysetParams` fetching `limit+1` to detect `hasMore` without a COUNT, generic `buildPage`); added `src/modules/course/course.repository.ts` (`listPublishedCourses` keyset-paginated; `getCourseBySlug` using nested `include` to avoid N+1, with `select` to drop heavy JSONB `blocks` from list views). **Verify:** `pagination.ts` fully typechecks (strict) + behavioral test passed (limit cap, cursor roundtrip, hasMore/nextCursor, take=limit+1); repository transpiles cleanly (esbuild). → *Lesson captured: pagination at scale (keyset) & the N+1 problem.*
-- **1.6** **ADR-0002** (Postgres + Prisma, normalized + JSONB) + Phase 1 course module + trackers.
+- **1.6** ✅ **Done** — **ADR-0002** (Postgres + Prisma, normalized + JSONB) + Phase 1 course module + trackers. *What was done:* wrote `docs/adr/0002-postgres-prisma-data-modeling.md` (SQL vs NoSQL, Prisma, normalized + JSONB, idempotent progress — full problem/options/decision/consequences); added the **`bb-data-modeling`** module (Phase 1) to `backend-build-curriculum.ts` with **5 lessons** (Prisma/connection, user 1:1, normalized+JSONB, migrations/seeding, pagination/N+1) authored from `course-notes.md`; auto-registered via the existing track export + home tab. Updated README phase tracker (Phase 1 ✅) + ADR index. Verified `tsc --noEmit` passes in `devmentor`. **Phase 1 complete (6/6).**
 
 ## Phase 2 — API Design & Validation · ☐ Pending
 - **2.1** REST conventions, `/api/v1` router mounting, OpenAPI setup. → *Lesson: REST vs GraphQL vs tRPC.*
@@ -187,7 +187,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | Phase | Tasks | Done | Status |
 |---|---|---|---|
 | 0 — Foundations | 8 | 8 | ✅ Complete |
-| 1 — Data modeling | 6 | 5 | 🟡 In progress |
+| 1 — Data modeling | 6 | 6 | ✅ Complete |
 | 2 — API design | 6 | 0 | ☐ |
 | 3 — Auth & security | 7 | 0 | ☐ |
 | 4 — Caching (Redis) | 5 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 1.5 complete — keyset pagination helper + course repository (N+1-safe includes)._
+_Last updated: Task 1.6 complete — ADR-0002 + Phase 1 course module live. **Phase 1 complete.** Next: Phase 2 — API Design & Validation._
