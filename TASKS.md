@@ -72,8 +72,8 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **1.5** ✅ **Done** — Repository layer + keyset pagination helper. *What was done:* added `src/lib/pagination.ts` (keyset/cursor pagination — opaque base64url cursor, `normalizeLimit` capped at 100/default 20, `keysetParams` fetching `limit+1` to detect `hasMore` without a COUNT, generic `buildPage`); added `src/modules/course/course.repository.ts` (`listPublishedCourses` keyset-paginated; `getCourseBySlug` using nested `include` to avoid N+1, with `select` to drop heavy JSONB `blocks` from list views). **Verify:** `pagination.ts` fully typechecks (strict) + behavioral test passed (limit cap, cursor roundtrip, hasMore/nextCursor, take=limit+1); repository transpiles cleanly (esbuild). → *Lesson captured: pagination at scale (keyset) & the N+1 problem.*
 - **1.6** ✅ **Done** — **ADR-0002** (Postgres + Prisma, normalized + JSONB) + Phase 1 course module + trackers. *What was done:* wrote `docs/adr/0002-postgres-prisma-data-modeling.md` (SQL vs NoSQL, Prisma, normalized + JSONB, idempotent progress — full problem/options/decision/consequences); added the **`bb-data-modeling`** module (Phase 1) to `backend-build-curriculum.ts` with **5 lessons** (Prisma/connection, user 1:1, normalized+JSONB, migrations/seeding, pagination/N+1) authored from `course-notes.md`; auto-registered via the existing track export + home tab. Updated README phase tracker (Phase 1 ✅) + ADR index. Verified `tsc --noEmit` passes in `devmentor`. **Phase 1 complete (6/6).**
 
-## Phase 2 — API Design & Validation · ☐ Pending
-- **2.1** REST conventions, `/api/v1` router mounting, OpenAPI setup. → *Lesson: REST vs GraphQL vs tRPC.*
+## Phase 2 — API Design & Validation · 🟡 In progress
+- **2.1** ✅ **Done** — REST conventions, `/api/v1` router mounting, OpenAPI setup. *What was done:* added `src/api/openapi.ts` (base OpenAPI 3.0.3 document with the shared `Error` schema + `registerPath` helper) and `src/api/router.ts` (versioned `apiRouter`: `GET /` discovery, `GET /openapi.json` contract, `GET /docs` Redoc UI from CDN — no new deps; documented REST conventions); mounted at `/api/v1` in `createApp()`. **Verify:** `tsc --noEmit` passes; live run — `/api/v1` 200 meta, `/api/v1/openapi.json` 200 (Error schema present), `/api/v1/docs` 200 html, unknown route 404 via the shared envelope with `requestId`. → *Lesson captured: versioned REST surface & the OpenAPI contract.*
 - **2.2** zod validation middleware + DTO pattern. → *Lesson: validating at the edge.*
 - **2.3** Course catalog endpoints (list/detail) with pagination + filtering. → *Lesson: serving large catalogs.*
 - **2.4** Lesson content endpoints. → *Lesson: content delivery shape.*
@@ -188,7 +188,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 |---|---|---|---|
 | 0 — Foundations | 8 | 8 | ✅ Complete |
 | 1 — Data modeling | 6 | 6 | ✅ Complete |
-| 2 — API design | 6 | 0 | ☐ |
+| 2 — API design | 6 | 1 | 🟡 In progress |
 | 3 — Auth & security | 7 | 0 | ☐ |
 | 4 — Caching (Redis) | 5 | 0 | ☐ |
 | 5 — Concurrency | 6 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 1.6 complete — ADR-0002 + Phase 1 course module live. **Phase 1 complete.** Next: Phase 2 — API Design & Validation._
+_Last updated: Task 2.1 complete — versioned `/api/v1` router + OpenAPI contract & Redoc docs (Phase 1 complete; Phase 2 underway)._

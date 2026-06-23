@@ -502,3 +502,46 @@ only what a list needs.
 **Quiz idea.** *What is the N+1 problem and how does `include` fix it?* → Fetching a list (1 query) then
 issuing one query per row for its relations (N queries) = N+1 round-trips. `include` (a join/batched query)
 fetches the parents and their relations together in a single query.
+
+---
+
+## Phase 2 — API Design & Validation
+
+### Lesson (Task 2.1): A Versioned REST Surface & the OpenAPI Contract
+
+**The Problem.** APIs evolve, and a change that helps one client can break another. Without a stable
+**versioning** scheme, you can't ship improvements safely; without a documented **contract**, every
+integration is guesswork and drifts from reality. We also want **consistent conventions** so the API is
+predictable across features.
+
+**Options on the table.**
+- *Versioning:* URL path (`/api/v1`) — simple, explicit, cache/proxy-friendly; header/`Accept` negotiation — cleaner URLs but harder to test/cache; query param — easy to forget. (chose URL path)
+- *Docs:* none — fastest, useless; hand-written — drifts from code; **OpenAPI** — a machine-readable contract that powers docs UIs and client generation. (chose OpenAPI)
+
+**Decision & Why.** Mount the API under **`/api/v1`** (version in the path) so a future breaking change is
+a new `/api/v2` router while v1 keeps working. Adopt **consistent conventions** — plural-noun resources,
+HTTP methods as verbs, keyset-paginated list envelopes `{ items, nextCursor, hasMore }`, and the single
+shared **Error** envelope. Maintain an **OpenAPI** document served at `/openapi.json` with a Redoc UI at
+`/docs`; feature routers `registerPath` their endpoints so the contract stays close to the code.
+
+**Implementation.**
+```ts
+// app.ts — version lives in the mount path
+app.use('/api/v1', apiRouter);
+
+// api/router.ts — discovery + contract + docs
+apiRouter.get('/', (_q, res) => res.json({ name: 'devmentor-api', version: '1.0.0', docs: '/api/v1/docs' }));
+apiRouter.get('/openapi.json', (_q, res) => res.json(openapiDocument));
+apiRouter.get('/docs', (_q, res) => res.type('html').send(redocHtml)); // Redoc from CDN — no server dep
+
+// feature routers mount here later: apiRouter.use('/courses', courseRouter)
+```
+
+**Pitfalls.** Don't make breaking changes inside `v1` — additive changes are fine, breaking ones get a new
+version. Version at a **coarse boundary** (the whole API), not per-endpoint. Keep the spec in sync by
+registering each endpoint's path as you build it — a contract that lies is worse than none. Define the
+error/envelope schema **once** and reference it everywhere.
+
+**Quiz idea.** *Why put the version in the URL path (`/api/v1`) rather than only in code?* → It's explicit,
+cacheable, and proxy-friendly, and lets a breaking `/api/v2` run alongside `/api/v1` so existing clients
+keep working while new ones migrate.
