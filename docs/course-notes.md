@@ -545,3 +545,45 @@ error/envelope schema **once** and reference it everywhere.
 **Quiz idea.** *Why put the version in the URL path (`/api/v1`) rather than only in code?* → It's explicit,
 cacheable, and proxy-friendly, and lets a breaking `/api/v2` run alongside `/api/v1` so existing clients
 keep working while new ones migrate.
+
+### Lesson (Task 2.2): Validate at the Edge & the DTO Pattern
+
+**The Problem.** Every request is untrusted input. If handlers validate ad-hoc, you get scattered,
+inconsistent checks; missed cases become security or crash bugs; and the input *type* a handler assumes drifts
+from what's actually validated. Query/route params are also always **strings** (`?limit=25` is `"25"`), so
+handlers end up doing manual `Number(...)` coercion everywhere.
+
+**Options on the table.**
+- *Manual `if` checks in each handler* — flexible, but inconsistent, repetitive, and easy to miss.
+- *A validation library (zod/joi) called inside handlers* — consistent, but validation still lives next to logic and types are separate.
+- *Schemas as DTOs + a validation middleware at the edge* — one schema is both the validator and the type; handlers trust their inputs. (chosen)
+
+**Decision & Why.** Define request shapes as **zod schemas (DTOs)** — the single source of truth — and use
+a **`validate` middleware** that parses `body`/`query`/`params` in **one pass** (so all problems are
+reported together), **coerces** values (string→number), and forwards failures to the central handler as a
+**400 VALIDATION_ERROR**. Static types come from `z.infer`, so the type and the runtime check can't drift.
+Past the middleware, handlers trust their inputs — no defensive checks.
+
+**Implementation.**
+```ts
+// schema IS the DTO — validation + type from one definition
+export const paginationQuery = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(), // "25" -> 25, capped
+});
+export type PaginationQuery = z.infer<typeof paginationQuery>;
+
+// one parse over all three locations; paths come out like "body.email"
+router.post('/users', validate({ body: createUserBody }), handler);
+router.get('/courses', validate({ query: paginationQuery }), handler);
+```
+
+**Pitfalls.** Query/route params are strings — **coerce** (`z.coerce.number()`), and remember `req.query`
+is a getter, so write coerced values back in place. Validate at the **boundary** so inner code can assume
+valid data. Don't hand-write a separate TypeScript type next to the schema — derive it with `z.infer` or
+they drift. Use **explicit DTOs** (don't accept arbitrary fields) so clients can't set fields they
+shouldn't (mass-assignment).
+
+**Quiz idea.** *Why is `limit` defined with `z.coerce.number()` in a query DTO?* → Query-string values are
+always strings (`"25"`); coercion turns it into a validated, bounded number so the handler receives the
+right type without manual parsing.
