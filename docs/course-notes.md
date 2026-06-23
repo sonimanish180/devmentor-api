@@ -628,3 +628,39 @@ OpenAPI as you add it so the contract stays truthful.
 **Quiz idea.** *Why return 404 (not 403 or an empty result) when a course exists but isn't published?* →
 To avoid leaking existence — distinguishing "not found" from "forbidden" tells a client the resource is
 real. A uniform 404 reveals nothing about hidden resources.
+
+### Lesson (Task 2.4): Resource Shape — List vs Detail
+
+**The Problem.** A lesson's content (`blocks`, `quiz`) is large JSONB. If the catalog list embedded every
+lesson's full content, payloads would balloon, the DB would read megabytes nobody asked for, and the list
+would be slow — yet a learner viewing one lesson needs all of it. One response shape can't serve both.
+
+**Options on the table.**
+- *Always return full content everywhere* — simple, but over-fetches massively in lists.
+- *Lightweight list + a detail-by-id endpoint that returns full content* — each response carries only what its use needs. (chosen)
+
+**Decision & Why.** The catalog (`getCourseBySlug`) returns lessons as **lightweight metadata** (`select`
+drops `blocks`), while **`GET /lessons/:id`** returns the **full** lesson (blocks + quiz). Lessons are
+addressed by their **stable id** (a slug is only unique within a module, so it can't identify a lesson
+globally). Visibility is enforced by pulling the parent course's `published` flag in the **same query** via
+`include`, then a uniform 404 for missing/unpublished.
+
+**Implementation.**
+```ts
+// detail: full content + parent publish flag in ONE query
+prisma.lesson.findUnique({
+  where: { id },
+  include: { module: { select: { slug: true, course: { select: { slug: true, published: true } } } } },
+});
+// service: hide unpublished
+if (!lesson || !lesson.module.course.published) throw AppError.notFound('Lesson not found: ' + id);
+```
+
+**Pitfalls.** Don't embed heavy JSONB in list endpoints — `select` only the fields a list needs. Don't
+re-query the course to check visibility (that's an N+1 / extra round-trip) — `include` the flag in the same
+query. Address a resource by something that uniquely identifies it (id here; a within-parent slug needs the
+parent in the path).
+
+**Quiz idea.** *Why fetch the parent course's `published` flag in the same query as the lesson, via
+`include`?* → To enforce visibility without a second round-trip (avoiding an N+1) — one query returns both
+the lesson content and the data needed to authorize returning it.

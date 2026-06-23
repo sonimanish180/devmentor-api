@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { openapiDocument } from './openapi';
 import { courseRouter } from '../modules/course/course.routes';
+import { lessonRouter } from '../modules/lesson/lesson.routes';
 
 /**
  * The versioned API surface. Mounted at `/api/v1` by the app factory, so the
@@ -49,3 +50,4 @@ apiRouter.get('/docs', (_req, res) => {
 
 // Feature routers.
 apiRouter.use('/courses', courseRouter);
+apiRouter.use('/lessons', lessonRouter);
