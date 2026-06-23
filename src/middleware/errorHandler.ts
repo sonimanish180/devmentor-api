@@ -33,6 +33,11 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
     code = 'VALIDATION_ERROR';
     message = 'Invalid request';
     details = err.issues.map((i) => ({ path: i.path.join('.'), message: i.message }));
+  } else if (err instanceof SyntaxError && 'body' in err) {
+    // Thrown by express.json() on a malformed request body.
+    statusCode = 400;
+    code = 'INVALID_JSON';
+    message = 'Malformed JSON in request body';
   } else if (err instanceof Error && !isProduction) {
     // Surface real messages in dev/test to speed debugging; hide them in prod.
     message = err.message;

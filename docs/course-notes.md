@@ -664,3 +664,45 @@ parent in the path).
 **Quiz idea.** *Why fetch the parent course's `published` flag in the same query as the lesson, via
 `include`?* → To enforce visibility without a second round-trip (avoiding an N+1) — one query returns both
 the lesson content and the data needed to authorize returning it.
+
+### Lesson (Task 2.5): Finishing the Contract Edges — 405, Malformed Input, Versioning
+
+**The Problem.** A polished API is predictable at its *edges*, not just on the happy path. Three rough
+edges remain: hitting a real path with the **wrong method** falls through to a misleading 404; a
+**malformed JSON** body bubbles up from the body parser as an ugly 500; and there's no way to **discover**
+which API versions exist.
+
+**Options on the table.**
+- *404 for everything unmatched* — simple, but a 404 on `POST /courses` wrongly implies the path doesn't exist.
+- *Proper 405 Method Not Allowed with an `Allow` header* — tells the client the resource exists and which methods it supports. (chosen)
+- *Let body-parser errors become 500* vs *map them to 400* — malformed input is a client error, so 400. (chose 400)
+
+**Decision & Why.** Mount a `methodNotAllowed([...])` handler with **`router.all(path, ...)` after** the
+real method handlers, so a known path answers unsupported methods with **405 + `Allow`** while genuinely
+unknown paths still 404. Map the body parser's `SyntaxError` to **400 INVALID_JSON** (a malformed body is
+the client's fault, not a server bug). Add a **`/api` version index** for discovery. Everything stays in
+the one error envelope.
+
+**Implementation.**
+```ts
+// 405 for known paths (after the GET handlers)
+courseRouter.get('/', ...); courseRouter.get('/:slug', ...);
+courseRouter.all('/', methodNotAllowed(['GET']));        // sets Allow: GET, throws 405
+courseRouter.all('/:slug', methodNotAllowed(['GET']));
+
+// malformed JSON -> 400, not 500
+} else if (err instanceof SyntaxError && 'body' in err) {
+  statusCode = 400; code = 'INVALID_JSON'; message = 'Malformed JSON in request body';
+}
+
+app.get('/api', (_q, res) => res.json({ versions: ['v1'], current: '/api/v1' }));
+```
+
+**Pitfalls.** The `.all()` 405 handler must come **after** the specific method handlers (otherwise it
+swallows the valid ones). Always set the **`Allow`** header on a 405 (the spec requires it). Keep the
+distinction: **404** = path unknown, **405** = path known but wrong method. The body-parser error is a
+`SyntaxError` carrying a `body` property — match on that, and return 400, not 500.
+
+**Quiz idea.** *What's the difference between 404 and 405, and when does each apply?* → 404 means the
+resource/path doesn't exist; 405 means it exists but the HTTP method isn't supported (and the response must
+include an `Allow` header listing the methods that are).

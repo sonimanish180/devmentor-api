@@ -31,6 +31,9 @@ export function createApp(): Express {
 
   // --- Security middleware mounts here in Phase 3 (helmet, CORS, rate limiting) ---
 
+  // Version index for discovery.
+  app.get('/api', (_req, res) => res.json({ versions: ['v1'], current: '/api/v1' }));
+
   // Versioned API surface.
   app.use('/api/v1', apiRouter);
 
