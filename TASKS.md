@@ -80,8 +80,8 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **2.5** ✅ **Done** — Error envelope, 404 / method-not-allowed, versioning. *What was done:* added `src/middleware/methodNotAllowed.ts` (sets `Allow` header, throws 405 `METHOD_NOT_ALLOWED`), wired `router.all(...)` after the GET handlers on course (`/`, `/:slug`) and lesson (`/:id`) routes; extended `errorHandler` to map express.json `SyntaxError` → **400 `INVALID_JSON`**; added a `GET /api` version index. **Verify:** `tsc --noEmit` passes; live run — GET 200, POST→405 (`Allow: GET`), malformed JSON→400 INVALID_JSON, `/api` index 200, unknown path→404, all in the uniform envelope. → *Lesson captured: finishing the contract edges — 405, malformed input, versioning.*
 - **2.6** ✅ **Done** — **ADR-0003** (REST chosen) + Phase 2 course module + trackers. *What was done:* wrote `docs/adr/0003-rest-api-style.md` (REST vs GraphQL vs tRPC — full problem/options/decision/consequences); added the **`bb-api-design`** module (Phase 2) to `backend-build-curriculum.ts` with **5 lessons** (versioned REST/OpenAPI, validate+DTO, layered endpoints, list vs detail, contract edges) from `course-notes.md`; auto-registered via the track export + home tab. Updated README phase tracker (Phase 2 ✅) + ADR index. Verified `tsc --noEmit` passes in `devmentor`. **Phase 2 complete (6/6).**
 
-## Phase 3 — Authentication & Security · ☐ Pending
-- **3.1** Password hashing (argon2) + credentials on `User`. → *Lesson: password hashing done right.*
+## Phase 3 — Authentication & Security · 🟡 In progress
+- **3.1** ✅ **Done** — Password hashing (argon2) + credentials on `User`. *What was done:* added `argon2` dep; added nullable `passwordHash` to the `User` model; created `src/modules/auth/password.ts` (`hashPassword`/`verifyPassword` using **argon2id**, OWASP params ~19MiB/t2/p1, fails closed on malformed hash); seeded the demo user with a dev password (`password123`). **Verify (full):** argon2 installed + ran in sandbox — hash is `$argon2id$…`, verify correct→true / wrong→false / garbage→false (no throw), salts random (two hashes differ); `password.ts` typechecks; schema + seed checks pass. ⚠️ Host: `pnpm install` (builds argon2 native) + `pnpm db:migrate`. → *Lesson captured: password hashing done right (argon2id).*
 - **3.2** JWT access/refresh issuance + `RefreshToken` table (hashed). → *Lesson: JWT internals & token design.*
 - **3.3** `register` / `login` / `me` endpoints. → *Lesson: the auth flow.*
 - **3.4** Refresh rotation + reuse detection + `logout`. → *Lesson: refresh rotation & theft detection.*
@@ -189,7 +189,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 0 — Foundations | 8 | 8 | ✅ Complete |
 | 1 — Data modeling | 6 | 6 | ✅ Complete |
 | 2 — API design | 6 | 6 | ✅ Complete |
-| 3 — Auth & security | 7 | 0 | ☐ |
+| 3 — Auth & security | 7 | 1 | 🟡 In progress |
 | 4 — Caching (Redis) | 5 | 0 | ☐ |
 | 5 — Concurrency | 6 | 0 | ☐ |
 | 6 — Queues (BullMQ) | 4 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 2.6 complete — ADR-0003 + Phase 2 course module live. **Phase 2 complete.** Next: Phase 3 — Authentication & Security._
+_Last updated: Task 3.1 complete — argon2id password hashing + nullable passwordHash on User (Phase 2 complete; Phase 3 underway)._

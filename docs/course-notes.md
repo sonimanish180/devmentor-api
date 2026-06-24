@@ -706,3 +706,44 @@ distinction: **404** = path unknown, **405** = path known but wrong method. The 
 **Quiz idea.** *What's the difference between 404 and 405, and when does each apply?* → 404 means the
 resource/path doesn't exist; 405 means it exists but the HTTP method isn't supported (and the response must
 include an `Allow` header listing the methods that are).
+
+---
+
+## Phase 3 — Authentication & Security
+
+### Lesson (Task 3.1): Password Hashing Done Right (argon2id)
+
+**The Problem.** We must store user passwords such that, even if the database leaks, attackers can't
+recover them — and can't cheaply brute-force them. Storing plaintext is catastrophic; so is reversible
+**encryption** (the key leaks too). Even a "hash" is dangerous if it's a **fast, general-purpose** hash
+(MD5/SHA-256): modern GPUs try billions per second.
+
+**Options on the table.**
+- *Plaintext / encryption* — recoverable; never acceptable for passwords.
+- *Fast hash (SHA-256) + salt* — salt stops rainbow tables, but it's still GPU-fast to brute force.
+- *Slow, salted, memory-hard hash* — bcrypt (battle-tested) or **argon2id** (current OWASP recommendation, resists GPU/ASIC attacks via memory cost). (chose argon2id)
+
+**Decision & Why.** Hash with **argon2id** at an OWASP baseline (~19 MiB memory, 2 iterations). It salts
+every hash automatically and embeds the salt + parameters in the output (`$argon2id$v=19$m=...$salt$hash`),
+so verification needs only the stored string. `verify` **fails closed** (returns false) on a malformed
+hash rather than throwing. The hash is **slow on purpose** — that cost is trivial per login but ruinous for
+an attacker trying billions of guesses.
+
+**Implementation.**
+```ts
+const HASH_OPTIONS: argon2.Options = { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 };
+export const hashPassword = (plain: string) => argon2.hash(plain, HASH_OPTIONS);
+export async function verifyPassword(hash: string, plain: string) {
+  try { return await argon2.verify(hash, plain); } catch { return false; } // fail closed
+}
+```
+The `User.passwordHash` column is nullable, so a future OAuth-only user can exist without a local password.
+
+**Pitfalls.** Never log, encrypt, or store the plaintext. Never use fast/general hashes (MD5/SHA) for
+passwords. Don't hand-roll salts — argon2 generates and stores a unique one per hash (which is why two
+hashes of the same password differ). You can raise the cost parameters over time safely — `verify` reads
+the parameters embedded in each existing hash.
+
+**Quiz idea.** *Why use a slow, memory-hard hash (argon2id) instead of SHA-256 for passwords?* → A fast
+hash can be brute-forced billions of times per second on a GPU; argon2id is deliberately slow and
+memory-hard, making large-scale guessing economically infeasible while staying cheap for a single login.

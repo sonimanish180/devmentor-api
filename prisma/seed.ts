@@ -1,4 +1,5 @@
 import { PrismaClient, Level } from '@prisma/client';
+import { hashPassword } from '../src/modules/auth/password';
 
 const prisma = new PrismaClient();
 
@@ -17,6 +18,7 @@ async function main() {
     create: {
       email: 'demo@devmentor.dev',
       name: 'Demo Learner',
+      passwordHash: await hashPassword('password123'), // dev-only demo credentials
       stats: { create: { totalXP: 0, streak: 0 } },
     },
   });

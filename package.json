@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.18.0",
+    "argon2": "^0.41.1",
     "express": "^4.19.2",
     "pino": "^9.3.2",
     "pino-http": "^10.2.0",

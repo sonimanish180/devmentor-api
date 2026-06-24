@@ -18,11 +18,14 @@ datasource db {
 // (password hash, refresh tokens) are added in Phase 3.
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  // argon2id hash of the password. Nullable: a user may sign up via OAuth later
+  // (Phase 3+) and never set a local password.
+  passwordHash String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   stats       UserStats?
   enrollments Enrollment[]
