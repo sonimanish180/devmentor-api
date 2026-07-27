@@ -87,7 +87,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | 2 | API design & validation | ✅ | [0003](./docs/adr/0003-rest-api-style.md) | [Phase 2 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
 | 3 | Authentication & security | ✅ | [0004](./docs/adr/0004-custom-jwt-auth.md) | [Phase 3 module](../devmentor/src/data/backend-build-curriculum.ts) (6 lessons) | — |
 | 4 | Caching & read performance (Redis) | ✅ | [0005](./docs/adr/0005-redis-cache-aside.md) | [Phase 4 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
-| 5 | Concurrency & consistency | ⬜ | — | — | — |
+| 5 | Concurrency & consistency | ✅ | [0006](./docs/adr/0006-concurrency-strategy.md) | [Phase 5 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
 | 6 | Async processing & queues (BullMQ) | ⬜ | — | — | — |
 | 7 | Event-driven architecture & outbox | ⬜ | — | — | — |
 | 8 | Notifications (multi-channel, realtime) | ⬜ | — | — | — |
@@ -114,6 +114,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | [0003](./docs/adr/0003-rest-api-style.md) | REST as the API style (over GraphQL/tRPC) | 2 | Accepted |
 | [0004](./docs/adr/0004-custom-jwt-auth.md) | Custom JWT auth (over Auth.js/managed) | 3 | Accepted |
 | [0005](./docs/adr/0005-redis-cache-aside.md) | Redis cache-aside for read performance | 4 | Accepted |
+| [0006](./docs/adr/0006-concurrency-strategy.md) | Concurrency: idempotency, OCC, transactions, locks | 5 | Accepted |
 
 ---
 

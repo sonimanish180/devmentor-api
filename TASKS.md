@@ -96,13 +96,13 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **4.4** ✅ **Done** — Event-based cache invalidation. *What was done:* `invalidateCourse(slug)` (detail + list prefix) and `invalidateLesson(id)` exported from the services, to be triggered by write paths / Phase 7 events; SCAN-based prefix clear. → *Lesson captured: cache invalidation.*
 - **4.5** ✅ **Done** — **ADR-0005** (Redis cache-aside) + Phase 4 course module + trackers. *What was done:* wrote `docs/adr/0005-redis-cache-aside.md`; added the **`bb-caching`** module (4 lessons) to `backend-build-curriculum.ts`; README + ADR index updated; `tsc --noEmit` passes in `devmentor`. **Verify:** cache/redis files typecheck (with express); service edits syntax-check. ⚠️ Host: `pnpm install` + `docker compose up -d` (Redis) then `GET /api/v1/courses` twice (2nd served from cache; `/ready` shows `redis: up`). **Phase 4 complete (5/5).**
 
-## Phase 5 — Concurrency & Consistency · ☐ Pending
-- **5.1** `Idempotency-Key` middleware + store. → *Lesson: idempotency & safe retries.*
-- **5.2** Optimistic concurrency helper (`version` → 409). → *Lesson: OCC vs pessimistic locking.*
-- **5.3** Transactional scoring/XP + atomic increments. → *Lesson: transactions & atomicity.*
-- **5.4** Redis Redlock utility for cross-request critical sections. → *Lesson: distributed locks (and their dangers).*
-- **5.5** Concurrency integration tests (parallel duplicate requests → one effect). → *Lesson: testing race conditions.*
-- **5.6** **ADR-0006** (idempotency + OCC + locks) + Phase 5 course module + trackers.
+## Phase 5 — Concurrency & Consistency · ✅ Complete
+- **5.1** ✅ **Done** — `Idempotency-Key` middleware + store. *What was done:* `src/middleware/idempotency.ts` — dedupes retried POSTs per-user via Redis (stores 2xx response keyed by user+method+path+key, replays with `Idempotent-Replay` header). Applied to `POST /progress/lessons/:id/complete`. **Verify (runtime):** 2 requests, same key → handler ran once, identical body, second replayed. → *Lesson captured: idempotency keys.*
+- **5.2** ✅ **Done** — Optimistic concurrency helper (`version` → 409). *What was done:* `src/lib/occ.ts` `occUpdate(run)` → throws 409 `CONFLICT` when a versioned `updateMany` affects 0 rows (feeds Phase 9 `QuizAttempt.version`). **Verify (runtime):** count=1 ok, count=0 → 409. Unit tests in `tests/concurrency.test.ts`. → *Lesson captured: OCC.*
+- **5.3** ✅ **Done** — Transactional scoring/XP + atomic increments. *What was done:* `progress` module — `completeLesson` in a `$transaction` (create completion + atomic `totalXP` increment); composite-PK unique violation → treated as "already completed" so XP is **exactly-once** under concurrency; `getProgress`; controller/routes/schema/openapi; mounted `/api/v1/progress`. → *Lesson captured: transactions & atomic increments.*
+- **5.4** ✅ **Done** — Redis distributed lock. *What was done:* `src/lib/lock.ts` `withLock(key, ttlMs, fn)` — `SET NX PX` acquire + token-checked Lua release; throws 409 if busy. **Verify (runtime):** concurrent `withLock` → 1 ran, 1 conflict. → *Lesson captured: distributed locks.*
+- **5.5** ✅ **Done** — Concurrency tests. *What was done:* `tests/concurrency.test.ts` — OCC unit tests (run anywhere) + a gated integration test firing **10 parallel** completes asserting exactly one XP award (`RUN_DB_TESTS=1` on host). **Verify:** primitives runtime-tested here; full suite via `pnpm test` on host. → *Lesson captured: testing concurrency.*
+- **5.6** ✅ **Done** — **ADR-0006** + Phase 5 course module + trackers. *What was done:* `docs/adr/0006-concurrency-strategy.md`; **`bb-concurrency`** module (5 lessons) added to `backend-build-curriculum.ts`; README + ADR index updated; `tsc --noEmit` passes in `devmentor`; clean typecheck of the whole prisma-free surface incl. the new primitives. **Phase 5 complete (6/6).**
 
 ## Phase 6 — Async Processing & Queues (BullMQ) · ☐ Pending
 - **6.1** BullMQ queues + `src/worker.ts` entrypoint. → *Lesson: sync vs async; why a queue.*
@@ -191,7 +191,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 2 — API design | 6 | 6 | ✅ Complete |
 | 3 — Auth & security | 7 | 7 | ✅ Complete |
 | 4 — Caching (Redis) | 5 | 5 | ✅ Complete |
-| 5 — Concurrency | 6 | 0 | ☐ |
+| 5 — Concurrency | 6 | 6 | ✅ Complete |
 | 6 — Queues (BullMQ) | 4 | 0 | ☐ |
 | 7 — Events & outbox | 5 | 0 | ☐ |
 | 8 — Notifications | 5 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Phase 4 complete (Tasks 4.1–4.5) — Redis shared cache: cache-aside + stampede protection, HTTP Cache-Control/ETags, invalidation, ADR-0005 + Phase 4 course module. Next: Phase 5 — Concurrency & Consistency._
+_Last updated: Phase 5 complete (Tasks 5.1–5.6) — idempotency keys, OCC helper, transactional exactly-once XP, Redis distributed lock, concurrency tests, ADR-0006 + Phase 5 course module. **Milestone A (Phases 0–5, shippable MVP) complete.** Next: Phase 6 — Async Processing & Queues (BullMQ)._

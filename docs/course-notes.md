@@ -994,3 +994,124 @@ as a safety net so a missed invalidation self-heals. Centralize key names so you
 **Quiz idea.** *Why use `SCAN` instead of `KEYS` to clear cached list pages in production?* → `KEYS` scans
 the entire keyspace in one blocking call, stalling Redis; `SCAN` iterates in small cursor-based batches
 without blocking other clients.
+
+---
+
+## Phase 5 — Concurrency & Consistency
+
+### Lesson (Task 5.1): Idempotency Keys
+
+**The Problem.** Networks are unreliable and users double-click. A client sends `POST /complete`, the
+response is lost, it retries — and the action runs twice (XP awarded twice, a payment charged twice). The
+operation isn't naturally safe to repeat.
+
+**Decision & Why.** Support an **`Idempotency-Key`** header. The first request runs and we store its
+response keyed by `(user, method, path, key)`; a **replay with the same key returns the stored response**
+without re-executing. Scoped per-user so keys can't collide across accounts; only successful (2xx)
+responses are stored. (For truly *simultaneous* duplicates, the data layer's unique constraints/upserts are
+the real guard — see 5.3; the header handles the common sequential-retry case.)
+
+**Pitfalls.** The client must send a stable key per logical operation (a fresh UUID per user action, reused
+across retries). Store only success responses (don't pin a transient 500). Give the record a TTL. Don't
+rely on it alone for concurrent requests — pair it with idempotent writes.
+
+**Quiz idea.** *What problem does an Idempotency-Key solve that a plain POST doesn't?* → Safe retries: a
+lost-response retry returns the original result instead of performing the action a second time.
+
+### Lesson (Task 5.2): Optimistic Concurrency Control (OCC)
+
+**The Problem.** Two tabs load the same record, both edit, both save — the second silently overwrites the
+first (a **lost update**). Pessimistically locking the row for the whole edit hurts throughput and can
+deadlock.
+
+**Decision & Why.** Use **optimistic** concurrency: the row carries a `version`; updates run
+`WHERE id = ? AND version = <expected>` and bump the version. If someone wrote first, the version no longer
+matches, **0 rows update**, and we return **409 Conflict** so the client refetches and retries. No locks
+held during the (slow, user-driven) edit; conflicts are detected at the (fast) write.
+
+```ts
+await occUpdate(() => prisma.quizAttempt.updateMany({
+  where: { id, version: expected },
+  data: { ...changes, version: { increment: 1 } },
+}));  // 0 rows -> 409
+```
+
+**Pitfalls.** The client must send the version it read and handle 409 by refetching. OCC suits low-contention
+edits; under heavy contention the constant retries make pessimistic locking better. Always increment the
+version in the same update.
+
+**Quiz idea.** *In OCC, what does a versioned update affecting 0 rows mean?* → Someone else modified the row
+since you read it (the version moved) — a lost-update conflict, surfaced as 409 so you refetch and retry.
+
+### Lesson (Task 5.3): Transactions & Atomic Increments (Exactly-Once XP)
+
+**The Problem.** Marking a lesson complete does two writes: record the completion AND add XP. If they don't
+happen together, a crash between them corrupts state (completed but no XP, or XP without completion). And
+`totalXP = read + amount` is a classic race — two concurrent requests both read the old value and one
+increment is lost.
+
+**Decision & Why.** Do both writes in a **transaction** (all-or-nothing) and make XP an **atomic increment**
+(`{ increment: xp }` — the DB adds, no read-modify-write). Exactly-once is enforced by the **composite
+primary key** on `LessonCompletion`: if two requests race, the second `create` violates the unique
+constraint, its transaction rolls back, and we treat it as "already completed" — XP is never doubled.
+
+```ts
+await prisma.$transaction(async (tx) => {
+  await tx.lessonCompletion.create({ data: { userId, lessonId } }); // P2002 if already done
+  await tx.userStats.update({ where: { userId }, data: { totalXP: { increment: xp } } });
+}); // duplicate race -> unique violation -> rollback -> no double XP
+```
+
+**Pitfalls.** Never read-modify-write a counter under concurrency — use an atomic increment. Wrap
+multi-write invariants in a transaction. Let the **database constraint** be the real guard (app-level checks
+race); catch the unique-violation and treat it as a no-op.
+
+**Quiz idea.** *Why is the composite-PK unique constraint — not an "if not already completed" check — what
+guarantees XP is awarded only once under concurrency?* → Two concurrent requests can both pass an app-level
+check; only the DB's unique constraint atomically rejects the second insert, so exactly one transaction
+commits and awards XP.
+
+### Lesson (Task 5.4): Distributed Locks
+
+**The Problem.** Some critical sections must run one-at-a-time across the whole cluster (e.g. "only one
+active quiz attempt per user"). A single-process mutex can't help when requests land on different replicas.
+
+**Decision & Why.** A **Redis lock**: acquire with `SET key token NX PX ttl` (atomic set-if-absent with an
+expiry), run the section, then release **only if we still own it** (compare the random token via a small Lua
+script, atomically). The PX expiry is a safety net so a crashed holder can't deadlock the key forever.
+
+```ts
+await withLock('attempt:' + userId, 5000, async () => { /* critical section */ });
+```
+
+**Pitfalls.** Always set a TTL (else a crash deadlocks). Release only your own lock (token compare) or you
+may free someone else's after your TTL lapsed. This single-node lock is fine here; multi-node correctness is
+the full Redlock algorithm. Prefer DB constraints/transactions when they can express the invariant — reach
+for a lock only when they can't.
+
+**Quiz idea.** *Why release a Redis lock by comparing a random token instead of just `DEL`-ing the key?* →
+If your operation ran past the lock's TTL, the key may have expired and been re-acquired by someone else; a
+blind `DEL` would free *their* lock. Token compare deletes only if you still own it.
+
+### Lesson (Task 5.5): Testing Concurrency
+
+**The Problem.** Race conditions hide in normal tests — a single sequential request always "works". Bugs only
+appear under simultaneous load, so you must test *parallelism* explicitly.
+
+**Decision & Why.** Write tests that fire **N parallel identical requests** and assert **exactly one effect**.
+For lesson completion: 10 concurrent completes → XP awarded once, one "fresh" result and nine no-ops.
+Unit-test the pure helpers (OCC → 409 on 0 rows) directly; run the DB/Redis integration tests against real
+services (gated so local runs stay fast, full suite runs in CI).
+
+```ts
+const results = await Promise.all(Array.from({ length: 10 }, () => completeLesson(userId, lessonId)));
+expect(results.filter(r => !r.alreadyCompleted)).toHaveLength(1); // exactly one award
+```
+
+**Pitfalls.** A sequential test can't catch a race — you must use `Promise.all`. Assert the *effect* (final
+XP), not just status codes. Use a real database for concurrency tests (an in-memory fake won't reproduce
+constraint/transaction behavior).
+
+**Quiz idea.** *Why must a concurrency test use `Promise.all` (parallel) rather than sequential requests?* →
+Sequential requests never overlap, so they can't trigger a race; only truly simultaneous requests exercise
+the locking/constraint/transaction paths where concurrency bugs live.

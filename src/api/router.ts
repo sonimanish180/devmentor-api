@@ -3,6 +3,7 @@ import { openapiDocument } from './openapi';
 import { authRouter } from '../modules/auth/auth.routes';
 import { courseRouter } from '../modules/course/course.routes';
 import { lessonRouter } from '../modules/lesson/lesson.routes';
+import { progressRouter } from '../modules/progress/progress.routes';
 
 /**
  * The versioned API surface. Mounted at `/api/v1` by the app factory, so the
@@ -53,3 +54,4 @@ apiRouter.get('/docs', (_req, res) => {
 apiRouter.use('/auth', authRouter);
 apiRouter.use('/courses', courseRouter);
 apiRouter.use('/lessons', lessonRouter);
+apiRouter.use('/progress', progressRouter);
