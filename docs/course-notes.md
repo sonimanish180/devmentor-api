@@ -1198,3 +1198,201 @@ handler guard is still needed for crash-after-side-effect redelivery.
 **Quiz idea.** *Why must a queue job handler be idempotent?* → Queues guarantee at-least-once delivery, so a
 job may run more than once (e.g. redelivered after a crash); an idempotent handler ensures repeats don't
 duplicate the side-effect.
+
+---
+
+## Phase 7 — Event-Driven Architecture & Outbox
+
+### Lesson (Task 7.1): The Dual-Write Problem
+
+**The Problem.** A request often needs to do two things that must both happen, or neither: change the
+database, **and** tell some other system it happened (publish to a queue, call a webhook). Those are two
+separate network calls to two separate systems — Postgres and Redis/BullMQ — and there's no transaction that
+spans both. If the DB commit succeeds but the publish call fails (crash, network blip), the event is lost
+forever with no record it should have existed. If you publish first and the DB write then fails, you've
+announced something that never happened. This is the **dual-write problem** — Task 6.1's registration flow
+(`await emailQueue.add(...)` right after creating the user) is a live example already in this codebase: if
+that enqueue fails after the user row commits, no welcome email is ever sent, and nothing detects it.
+
+**Options on the table.**
+- *Best-effort: write DB, then publish, ignore/log publish failures* — what Task 6.1 does; simple, but silently loses events under failure.
+- *Two-phase commit across Postgres and the broker* — technically solves it, but few brokers support real 2PC and it couples the two systems' availability together.
+- *Transactional outbox* — write an `OutboxEvent` row in the **same DB transaction** as the change, and let a separate process relay it. The event's existence is as durable as the change itself. (chosen)
+
+**Decision & Why.** Adopt the **transactional outbox** pattern: instead of calling out to Redis/BullMQ from
+inside the request, write one more row to the database you're already committing to. Postgres gives us
+atomicity for free across "the change" and "the event exists" — something no cross-system call can. A
+separate **relay** (Task 7.3) is responsible for actually getting the event to the queue, on its own schedule,
+with its own retries — decoupled entirely from the request path.
+
+**Implementation.**
+```prisma
+model OutboxEvent {
+  id           String    @id @default(cuid())
+  type         String    // e.g. "LessonCompleted"
+  payload      Json
+  createdAt    DateTime  @default(now())
+  dispatchedAt DateTime? // null = not yet relayed to the queue
+
+  @@index([dispatchedAt, createdAt]) // supports the relay's poll query
+}
+```
+```ts
+// src/events/contracts.ts — one typed shape producers and subscribers both agree on
+export type DomainEvent = { type: 'LessonCompleted'; payload: { userId: string; lessonId: string; xp: number } };
+```
+
+**Pitfalls.** The outbox table is *not* a queue itself — it's just evidence, inside the transaction, that an
+event should exist; something else still has to relay it (Task 7.3). Don't `JSON.stringify` payloads by hand
+into a `String` column — use a real `Json` column so it's queryable/typed. Keep event payloads self-contained
+(include the data a subscriber needs, like `xp` here) so subscribers don't have to re-fetch state that might
+have since changed.
+
+**Quiz idea.** *Why can't you just call `queue.add()` right after `prisma.user.create()` and call it done?* →
+Those are two independent calls to two different systems with no shared transaction — if the queue call fails
+after the DB commit succeeds (or vice versa), you get a lost event or a phantom one. This is the dual-write
+problem, and it's why the event write has to happen inside the same DB transaction as the change.
+
+### Lesson (Task 7.2): Transactional Outbox in Practice
+
+**The Problem.** Phase 5 made `completeLesson` award XP **inline**, in the same transaction as the
+completion row — exactly-once, but tightly coupled: every future thing that should react to "a lesson was
+completed" (XP today; streaks, notifications, analytics tomorrow) would have to be bolted into that one
+transaction, growing it forever and coupling unrelated concerns into the progress module.
+
+**Options on the table.**
+- *Keep growing the transaction* — add more logic inline for every new reaction; simple per-change, but the progress module becomes a junk drawer and every new consumer needs a schema/code change here.
+- *Fire events after the transaction commits* — decoupled, but reintroduces the dual-write problem (Lesson 7.1) between "commit" and "publish".
+- *Write the event inside the same transaction as the completion, let a subscriber react asynchronously* — atomic with the change, decoupled from its consumers. (chosen)
+
+**Decision & Why.** `completeLesson`'s transaction now creates the `LessonCompletion` row **and** a
+`LessonCompleted` `OutboxEvent` row — nothing else. The XP increment moves out to an async subscriber
+(Task 7.4). The composite PK on `LessonCompletion` still gives the *transaction* its exactly-once guarantee
+(a racing duplicate hits `P2002`, rolls back, and — critically — never writes an event either, since the
+event write is in the same transaction). The trade-off: `totalXP` becomes **eventually consistent** with
+completions instead of updating in the same instant. That's an explicit, deliberate cost — normally
+milliseconds — in exchange for a write path that no longer needs to know who cares about lesson completions.
+
+**Implementation.**
+```ts
+export async function completeLesson(userId: string, lessonId: string) {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const lesson = await tx.lesson.findUnique({ where: { id: lessonId }, select: { xp: true } });
+      if (!lesson) throw AppError.notFound(`Lesson not found: ${lessonId}`);
+
+      await tx.lessonCompletion.create({ data: { userId, lessonId } }); // still the exactly-once guard
+      await writeOutboxEvent(tx, { type: 'LessonCompleted', payload: { userId, lessonId, xp: lesson.xp } });
+
+      return { alreadyCompleted: false, xpAwarded: lesson.xp }; // "awarded" here means queued, not yet applied
+    });
+  } catch (e) {
+    if (isUniqueViolation(e)) return { alreadyCompleted: true, xpAwarded: 0 };
+    throw e;
+  }
+}
+```
+
+**Pitfalls.** `writeOutboxEvent` must be called with the **same `tx`** as the rest of the transaction — pass
+the ambient Postgres client, not the global `prisma` singleton, or the event write escapes the atomicity
+guarantee entirely. Moving a side effect out to "eventually consistent" is a real product trade-off, not just
+an implementation detail — document it (as here) so nobody's surprised that `GET /progress` might briefly lag
+a completion.
+
+**Quiz idea.** *If `tx.lessonCompletion.create()` throws a unique-constraint violation, does the outbox event
+still get written?* → No — both statements are in the same transaction, so when it rolls back, neither the
+completion row nor the event exists. That's exactly why the event is written inside `tx`, not after it.
+
+### Lesson (Task 7.3): Reliable Delivery — the Outbox Relay
+
+**The Problem.** Writing an `OutboxEvent` row makes the event durable, but it's still just a row in
+Postgres — nothing has told the "events" queue (or any subscriber) that it exists. Something has to poll for
+undispatched rows and hand them to the queue, and it has to do that safely even if it crashes mid-batch or
+runs as multiple replicas.
+
+**Options on the table.**
+- *A single relay instance, no locking* — simple, but a single point of failure and can't scale.
+- *Multiple relay replicas, plain `SELECT ... LIMIT n`* — replicas race to grab the same rows, double-publishing (mitigated only by consumer idempotency, which does extra unnecessary work).
+- *Multiple replicas + `SELECT ... FOR UPDATE SKIP LOCKED`* — each replica's transaction locks a disjoint batch of rows; no coordination service needed. (chosen)
+
+**Decision & Why.** A relay loop polls every second for a batch of undispatched rows using
+`FOR UPDATE SKIP LOCKED`, publishes each to the "events" BullMQ queue with `jobId: event:<id>` (so a
+re-publish after a crash is a no-op, not a duplicate), then marks the batch dispatched — all inside one DB
+transaction. Publish happens **before** the rows are marked dispatched: if the process dies in between, the
+transaction rolls back, the rows stay undispatched, and the next tick safely republishes them. This is the
+same at-least-once-over-under-delivery choice made for job queues in Phase 6, applied one layer up.
+
+**Implementation.**
+```ts
+async function relayBatch() {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw`
+      SELECT id, type, payload FROM "OutboxEvent"
+      WHERE "dispatchedAt" IS NULL ORDER BY "createdAt" ASC LIMIT ${BATCH_SIZE}
+      FOR UPDATE SKIP LOCKED`;              // disjoint batches across replicas, no lock service
+    for (const row of rows) {
+      await eventsQueue.add(row.type, { eventId: row.id, type: row.type, payload: row.payload },
+        { jobId: `event:${row.id}` });       // re-publish after a crash is deduped by BullMQ
+    }
+    await tx.outboxEvent.updateMany({ where: { id: { in: rows.map(r => r.id) } }, data: { dispatchedAt: new Date() } });
+    return rows.length;
+  });
+}
+```
+
+**Pitfalls.** `SKIP LOCKED` rows are invisible to other transactions only for the *duration* of this one — keep
+the batch/transaction short. Publishing before marking-dispatched (not after) is what avoids ever losing an
+event; the price is a possible duplicate publish, which is why the queue-side `jobId` dedupe and the
+subscriber's own idempotency (Task 7.4) both matter. A relay that polls too infrequently adds latency between
+"event happened" and "subscriber reacted" — tune the interval to the freshness you need.
+
+**Quiz idea.** *Why does `FOR UPDATE SKIP LOCKED` let you run more than one relay replica safely, without a
+distributed lock?* → Each replica's transaction locks only the rows it selects; a concurrent replica's
+`SELECT ... SKIP LOCKED` simply skips those already-locked rows and grabs a different batch, so replicas never
+process the same row twice without any external coordination.
+
+### Lesson (Task 7.4): Decoupling via Events — the First Subscriber
+
+**The Problem.** With events reliably reaching the "events" queue, something has to actually *do* something
+with a `LessonCompleted` event — and it has to do it safely, since BullMQ (like Phase 6) delivers
+at-least-once: the same event can be handed to a subscriber more than once (a retry, a DLQ replay, or simply
+the relay's own at-least-once republish from Task 7.3).
+
+**Options on the table.**
+- *Trust the queue's `jobId` dedupe alone* — mostly works, but doesn't cover manual retries/DLQ replays, which reuse the same job.
+- *A subscriber-side idempotency guard, keyed by the outbox event id* — defends against redelivery regardless of source, at the cost of one Redis round-trip per event. (chosen)
+
+**Decision & Why.** `src/queues/events.worker.ts` subscribes to the "events" queue and fans out on
+`job.data.type`. The first subscriber, `handleLessonCompleted`, does exactly what used to live inline in
+`completeLesson` — an atomic `totalXP` increment — but now guarded by `withEventGuard`, a Redis `SET NX`
+keyed by the **outbox event's id** (not the lesson or user id, since the same lesson can of course be
+completed by the same user only once, but we're guarding the *event delivery*, which could in principle be
+redelivered independent of that). This is the exact same shape of fix as Task 6.3's welcome-email guard,
+pulled into a small reusable helper.
+
+**Implementation.**
+```ts
+async function handleLessonCompleted(eventId: string, payload: LessonCompletedPayload) {
+  await withEventGuard(redis, `event:xp-awarded:${eventId}`, THIRTY_DAYS, async () => {
+    await prisma.userStats.update({ where: { userId: payload.userId }, data: { totalXP: { increment: payload.xp } } });
+  });
+}
+// events.worker.ts fans out on type — adding a second subscriber later is one more `case`, no change
+// to completeLesson or the relay at all.
+switch (job.data.type) {
+  case 'LessonCompleted': await handleLessonCompleted(job.data.eventId, job.data.payload); break;
+}
+```
+
+**Pitfalls.** Guard on the **event id**, not the business key alone — a business-keyed guard (e.g.
+`xp:${userId}:${lessonId}`) would be right for *this* subscriber but wouldn't generalize to a subscriber where
+the same business key legitimately fires more than once. Adding a new reaction to `LessonCompleted` (say, a
+streak update) should never require touching `completeLesson` again — if it does, the decoupling isn't real.
+Watch the "events" queue's failed set like any other DLQ (Phase 6) — a stuck subscriber silently means XP (or
+whatever it does) never lands.
+
+**Quiz idea.** *Why does the events worker guard on the outbox event's id rather than reusing the same
+`job:welcome:done:<userId>`-style business key from Task 6.3?* → The guard has to make *event delivery*
+idempotent, independent of which subscriber or business key is involved — keying on the event id means any
+current or future subscriber can safely dedupe redelivery of that specific event, without assuming anything
+about how often the underlying business action can occur.

@@ -89,7 +89,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | 4 | Caching & read performance (Redis) | ✅ | [0005](./docs/adr/0005-redis-cache-aside.md) | [Phase 4 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
 | 5 | Concurrency & consistency | ✅ | [0006](./docs/adr/0006-concurrency-strategy.md) | [Phase 5 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
 | 6 | Async processing & queues (BullMQ) | ✅ | [0007](./docs/adr/0007-bullmq-task-queue.md) | [Phase 6 module](../devmentor/src/data/backend-build-curriculum.ts) (3 lessons) | — |
-| 7 | Event-driven architecture & outbox | ⬜ | — | — | — |
+| 7 | Event-driven architecture & outbox | ✅ | [0008](./docs/adr/0008-transactional-outbox.md) | [Phase 7 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
 | 8 | Notifications (multi-channel, realtime) | ⬜ | — | — | — |
 | 9 | Quizzes & timed assessments | ⬜ | — | — | — |
 | 10 | Messaging at scale (Kafka) | ⬜ | — | — | — |
@@ -116,6 +116,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | [0005](./docs/adr/0005-redis-cache-aside.md) | Redis cache-aside for read performance | 4 | Accepted |
 | [0006](./docs/adr/0006-concurrency-strategy.md) | Concurrency: idempotency, OCC, transactions, locks | 5 | Accepted |
 | [0007](./docs/adr/0007-bullmq-task-queue.md) | BullMQ for background jobs (not Kafka yet) | 6 | Accepted |
+| [0008](./docs/adr/0008-transactional-outbox.md) | Transactional outbox for domain events | 7 | Accepted |
 
 ---
 

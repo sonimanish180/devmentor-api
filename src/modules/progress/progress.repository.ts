@@ -1,5 +1,6 @@
 import { prisma } from '../../lib/prisma';
 import { AppError } from '../../lib/AppError';
+import { writeOutboxEvent } from '../../events/outbox';
 
 /** Prisma throws P2002 on a unique-constraint violation. */
 function isUniqueViolation(e: unknown): boolean {
@@ -7,15 +8,26 @@ function isUniqueViolation(e: unknown): boolean {
 }
 
 /**
- * Mark a lesson complete and award its XP — exactly once, even under concurrent
- * duplicate requests.
+ * Mark a lesson complete — exactly once, even under concurrent duplicate
+ * requests — and RECORD (not directly award) the XP via a domain event.
  *
- * The award runs in a TRANSACTION (completion row + XP increment commit together
- * or not at all), and XP is an ATOMIC increment (no read-modify-write race). The
- * real exactly-once guard is the composite PK on LessonCompletion: if two
- * requests race, the second `create` violates the unique constraint, its
- * transaction rolls back, and we treat it as "already completed" — so XP is
- * never awarded twice.
+ * Through Phase 5 this transaction also incremented `UserStats.totalXP`
+ * inline. As of Phase 7 it instead writes a `LessonCompleted` OutboxEvent row
+ * in the SAME transaction as the completion. Why the split: XP-awarding is
+ * about to have more than one interested party (an Task 7.4 subscriber today;
+ * notifications/streak logic soon) and none of that fan-out belongs on the
+ * request's critical path or coupled into this module. The completion write
+ * and the "announce it happened" write still commit atomically together
+ * (no dual-write risk) — only the XP increment itself moves to an async,
+ * idempotent subscriber (`src/queues/events.worker.ts`). The composite PK on
+ * LessonCompletion is still what makes *this* request exactly-once: a racing
+ * duplicate hits P2002, its transaction rolls back, and no event is ever
+ * written for it.
+ *
+ * Trade-off: `totalXP` is now EVENTUALLY consistent with completions — it
+ * catches up once the relay (Task 7.3) and subscriber (Task 7.4) run, which
+ * is normally milliseconds, not zero. `getProgress` below still reads
+ * `completedLessons` (always current) and `totalXP` (eventually current).
  */
 export async function completeLesson(userId: string, lessonId: string) {
   try {
@@ -24,9 +36,9 @@ export async function completeLesson(userId: string, lessonId: string) {
       if (!lesson) throw AppError.notFound(`Lesson not found: ${lessonId}`);
 
       await tx.lessonCompletion.create({ data: { userId, lessonId } }); // throws P2002 if already done
-      await tx.userStats.update({
-        where: { userId },
-        data: { totalXP: { increment: lesson.xp } }, // atomic increment
+      await writeOutboxEvent(tx, {
+        type: 'LessonCompleted',
+        payload: { userId, lessonId, xp: lesson.xp },
       });
 
       return { alreadyCompleted: false, xpAwarded: lesson.xp };

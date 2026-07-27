@@ -169,3 +169,24 @@ model QuizScore {
   @@id([userId, lessonId])
   @@index([lessonId])
 }
+
+// ─── Event-driven backbone (transactional outbox) ────────────────────────
+// A row here is written in the SAME database transaction as the business
+// change it describes (e.g. a LessonCompletion insert). That's what makes
+// this an "outbox": we never call out to Redis/BullMQ from inside the
+// request path just to announce something happened — we just add one more
+// row to the transaction we were already committing. A separate relay
+// process (Task 7.3) polls undispatched rows and publishes them to a queue,
+// so the write and the "tell everyone" step can never disagree (no dual
+// write). `dispatchedAt` is null until the relay has handed it to BullMQ;
+// the index supports the relay's "give me the oldest undispatched batch"
+// poll query.
+model OutboxEvent {
+  id           String    @id @default(cuid())
+  type         String // e.g. "LessonCompleted" — see src/events/contracts.ts
+  payload      Json
+  createdAt    DateTime  @default(now())
+  dispatchedAt DateTime?
+
+  @@index([dispatchedAt, createdAt])
+}
