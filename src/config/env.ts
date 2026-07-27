@@ -21,6 +21,8 @@ const envSchema = z.object({
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(7),
   // Allowed browser origin for CORS (the devmentor frontend).
   CORS_ORIGIN: z.string().url().default('http://localhost:3000'),
+  // Redis (Phase 4) — cache, locks, and later pub/sub + queues.
+  REDIS_URL: z.string().url().default('redis://localhost:6379'),
 });
 
 export type Env = z.infer<typeof envSchema>;

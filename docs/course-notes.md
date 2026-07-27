@@ -886,3 +886,111 @@ comes in Phase 4/5. Put helmet/CORS early in the middleware chain.
 **Quiz idea.** *Why can't the CORS `origin` be `*` when `credentials: true`?* → The browser forbids sending
 credentials (cookies) to a wildcard origin; you must specify the exact allowed origin for credentialed
 requests.
+
+---
+
+## Phase 4 — Caching & Read Performance (Redis)
+
+### Lesson (Task 4.1): Why a Shared Cache (Redis), Not Local Memory
+
+**The Problem.** The course catalog and lesson reads are hot, identical for everyone, and change rarely —
+yet every request hits Postgres. Under load that's wasteful and slow. The naive fix, an in-process `Map`
+cache, breaks the moment you run more than one instance: each replica has its own cache, hit rates are low,
+and invalidation can't reach the other replicas.
+
+**Options on the table.**
+- *No cache (just scale the DB)* — simplest, but expensive and eventually the bottleneck.
+- *In-process memory cache* — fast, zero infra, but per-replica (not shared) and lost on restart.
+- *A shared cache — Redis* — one cache all replicas read/write, survives restarts, supports TTLs, locks, pub/sub. (chosen)
+
+**Decision & Why.** Introduce **Redis** as a shared cache (and later: locks, pub/sub, queues). A single
+client (cached on `globalThis` in dev like Prisma), wired into readiness (`PING`) and graceful shutdown
+(`quit`). This is *why Redis enters the stack* — a shared cache is the first thing a horizontally-scaled
+service needs that local memory can't provide.
+
+```ts
+export const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3 });
+registerReadinessCheck({ name: 'redis', check: async () => { await redis.ping(); } });
+```
+
+**Pitfalls.** Don't reach for a local `Map` in a multi-instance service — it fragments the cache and can't
+be invalidated cluster-wide. Share one client (many connections exhaust Redis). Add Redis to readiness so a
+Redis outage pulls the instance from rotation.
+
+**Quiz idea.** *Why prefer Redis over an in-process cache once you run more than one instance?* → An
+in-process cache is per-replica: low hit rate and no way to invalidate across instances. Redis is a single
+shared cache all replicas use, so hits are high and invalidation is global.
+
+### Lesson (Task 4.2): Cache-Aside & Stampede Protection
+
+**The Problem.** The standard read pattern is cache-aside: check cache, on a miss load from the source and
+populate the cache. But a **cache stampede** (a.k.a. dogpile) happens when a hot key expires and hundreds of
+concurrent requests all miss at once and hammer the database simultaneously.
+
+**Decision & Why.** Implement `cacheAside(key, ttl, loader)` with two layers of stampede protection:
+(1) **per-process single-flight** — concurrent misses for the same key on one instance share one loader
+promise; (2) a short **Redis lock** (`SET NX PX`) so only one instance across the cluster rebuilds a hot key
+while the others briefly wait and re-read. A loader that throws (404) is **not** cached.
+
+```ts
+const cached = await redis.get(key);
+if (cached !== null) return JSON.parse(cached);        // hit
+// miss: single-flight in-process + SET NX lock cross-process, then:
+const value = await loader();
+await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+```
+
+**Pitfalls.** Without stampede protection, a popular key's expiry becomes a mini-outage. Don't cache errors
+/ not-found (or you pin a transient failure). Set sensible TTLs (a stale-but-cheap read vs. freshness).
+Remember cached JSON loses types (Dates become strings) — fine over HTTP, surprising in code.
+
+**Quiz idea.** *What is a cache stampede and how does a per-key lock help?* → When a hot key expires, many
+concurrent requests miss and all hit the DB at once. A lock (or single-flight) lets just one request rebuild
+the value while the rest wait/re-read, protecting the database.
+
+### Lesson (Task 4.3): HTTP Caching — Cache-Control & ETags
+
+**The Problem.** Even with Redis, every read still makes a network round-trip to the API. For public,
+slow-changing data, the browser or a CDN could avoid the request entirely.
+
+**Decision & Why.** Add **`Cache-Control: public, max-age=...`** to public GET responses so browsers/CDNs
+serve them without hitting the API. Express already emits a **weak ETag** for JSON bodies and returns
+**304 Not Modified** when the client sends a matching `If-None-Match`, so conditional requests (revalidate
+cheaply) work for free. Server-side Redis and HTTP caching are complementary layers.
+
+```ts
+res.set('Cache-Control', 'public, max-age=300'); // browser/CDN caching
+// Express: weak ETag + automatic 304 on If-None-Match
+```
+
+**Pitfalls.** Only mark truly public, non-personalized responses `public` — never cache authenticated,
+user-specific data in shared caches. Match `max-age` to how stale the data may be. A 304 still costs a
+round-trip but skips the body; `max-age` skips the request entirely until it lapses.
+
+**Quiz idea.** *What's the difference between what `max-age` and an ETag/304 save?* → `max-age` lets the
+client skip the request entirely until it expires; an ETag with `If-None-Match` still makes the request but
+returns 304 with no body when unchanged (cheap revalidation).
+
+### Lesson (Task 4.4): Cache Invalidation
+
+**The Problem.** "There are only two hard things in computer science…" — stale caches. When data changes, the
+cached copy must be cleared, or users see old data. And a change often affects several cached keys (a course
+detail *and* every catalog list page it appears in).
+
+**Decision & Why.** Keep all cache keys in one registry (`cacheKeys`) so invalidation is knowable. On a
+change, delete the specific key(s) and clear affected collections. For list pages (many cursor variants),
+clear the whole prefix with **SCAN** (cursor-based, non-blocking) — never `KEYS` in production. Invalidation
+is triggered by write paths / domain events (event-driven, wired via the Phase 7 outbox).
+
+```ts
+await redis.del(cacheKeys.course(slug));      // clear the detail
+await invalidateByPrefix('courses:list:');    // clear list pages (SCAN + DEL)
+```
+
+**Pitfalls.** Never use `KEYS` in production — it blocks Redis scanning the whole keyspace; use `SCAN`.
+Remember to invalidate **all** affected keys (detail + lists + any denormalized copies). Prefer short TTLs
+as a safety net so a missed invalidation self-heals. Centralize key names so you can't forget one.
+
+**Quiz idea.** *Why use `SCAN` instead of `KEYS` to clear cached list pages in production?* → `KEYS` scans
+the entire keyspace in one blocking call, stalling Redis; `SCAN` iterates in small cursor-based batches
+without blocking other clients.

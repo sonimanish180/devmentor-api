@@ -89,12 +89,12 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **3.6** ✅ **Done** — Hardening: helmet, CORS (credentials), rate limiting. *What was done:* `app.ts` now uses **helmet**, **cors** (`origin: CORS_ORIGIN`, `credentials: true`), **cookie-parser**, `trust proxy`, and `authRateLimiter` (`src/middleware/rateLimit.ts`, express-rate-limit → 429 via envelope) on `/api/v1/auth`; `CORS_ORIGIN` env added. **Verify:** rate limiter → 429 after 20 hits (runtime). → *Lesson captured: security hardening.*
 - **3.7** ✅ **Done** — **ADR-0004** (custom JWT vs Auth.js) + Phase 3 course module + trackers. *What was done:* wrote `docs/adr/0004-custom-jwt-auth.md`; added the **`bb-auth-security`** module (Phase 3) with **6 lessons** (password hashing, two-token auth, auth flow, rotation/reuse, RBAC, hardening) to `backend-build-curriculum.ts`; updated README + ADR index; `tsc --noEmit` passes in `devmentor`. **Verify:** whole prisma-free surface typechecks; DB-touching auth files syntax-check. ⚠️ Host: `pnpm install` + `pnpm db:migrate` (adds `role`, `RefreshToken`), then exercise register/login/refresh/me. **Phase 3 complete (7/7).**
 
-## Phase 4 — Caching & Read Performance (Redis) · ☐ Pending
-- **4.1** Redis client + readiness wiring. → *Lesson: why a shared cache (not in-process).*
-- **4.2** Cache-aside wrapper + TTL + stampede protection. → *Lesson: caching strategies & stampede.*
-- **4.3** Cache catalog/lesson reads + ETags. → *Lesson: HTTP caching at the edge.*
-- **4.4** Event-based cache invalidation. → *Lesson: invalidation is the hard part.*
-- **4.5** **ADR-0005** (Redis cache-aside) + Phase 4 course module + trackers.
+## Phase 4 — Caching & Read Performance (Redis) · ✅ Complete
+- **4.1** ✅ **Done** — Redis client + readiness wiring. *What was done:* `ioredis` dep + `REDIS_URL` env; `src/lib/redis.ts` (singleton client cached on globalThis in dev; `registerRedisHooks` → `PING` readiness + `quit` shutdown); wired in `server.ts`. → *Lesson captured: why a shared cache (not in-process).*
+- **4.2** ✅ **Done** — Cache-aside wrapper + TTL + stampede protection. *What was done:* `src/lib/cache.ts` (`cacheAside(key, ttl, loader)` with per-process **single-flight** + Redis `SET NX` **lock**; `invalidate`, `invalidateByPrefix` via SCAN) + `src/lib/cacheKeys.ts`. **Verify (full runtime, ioredis-mock):** 2 reads → 1 loader call; 6 concurrent misses → 1 loader call; invalidate → reload. → *Lesson captured: cache-aside & stampede protection.*
+- **4.3** ✅ **Done** — Cache catalog/lesson reads + ETags. *What was done:* `course.service`/`lesson.service` reads wrapped in `cacheAside` (list 60s, detail 300s); `src/middleware/cacheControl.ts` added to course/lesson GET routes; relies on Express weak ETag → 304. → *Lesson captured: HTTP caching (Cache-Control & ETags).*
+- **4.4** ✅ **Done** — Event-based cache invalidation. *What was done:* `invalidateCourse(slug)` (detail + list prefix) and `invalidateLesson(id)` exported from the services, to be triggered by write paths / Phase 7 events; SCAN-based prefix clear. → *Lesson captured: cache invalidation.*
+- **4.5** ✅ **Done** — **ADR-0005** (Redis cache-aside) + Phase 4 course module + trackers. *What was done:* wrote `docs/adr/0005-redis-cache-aside.md`; added the **`bb-caching`** module (4 lessons) to `backend-build-curriculum.ts`; README + ADR index updated; `tsc --noEmit` passes in `devmentor`. **Verify:** cache/redis files typecheck (with express); service edits syntax-check. ⚠️ Host: `pnpm install` + `docker compose up -d` (Redis) then `GET /api/v1/courses` twice (2nd served from cache; `/ready` shows `redis: up`). **Phase 4 complete (5/5).**
 
 ## Phase 5 — Concurrency & Consistency · ☐ Pending
 - **5.1** `Idempotency-Key` middleware + store. → *Lesson: idempotency & safe retries.*
@@ -190,7 +190,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 1 — Data modeling | 6 | 6 | ✅ Complete |
 | 2 — API design | 6 | 6 | ✅ Complete |
 | 3 — Auth & security | 7 | 7 | ✅ Complete |
-| 4 — Caching (Redis) | 5 | 0 | ☐ |
+| 4 — Caching (Redis) | 5 | 5 | ✅ Complete |
 | 5 — Concurrency | 6 | 0 | ☐ |
 | 6 — Queues (BullMQ) | 4 | 0 | ☐ |
 | 7 — Events & outbox | 5 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Phase 3 complete (Tasks 3.3–3.7) — full auth: register/login/me, refresh rotation + reuse detection, requireAuth + RBAC, helmet/CORS/rate-limit hardening, ADR-0004 + Phase 3 course module. Next: Phase 4 — Caching & Read Performance (Redis)._
+_Last updated: Phase 4 complete (Tasks 4.1–4.5) — Redis shared cache: cache-aside + stampede protection, HTTP Cache-Control/ETags, invalidation, ADR-0005 + Phase 4 course module. Next: Phase 5 — Concurrency & Consistency._

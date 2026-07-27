@@ -2,6 +2,7 @@ import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './lib/logger';
 import { registerPrismaHooks } from './lib/prisma';
+import { registerRedisHooks } from './lib/redis';
 import { runShutdownHooks } from './lib/shutdown';
 
 /**
@@ -19,6 +20,7 @@ import { runShutdownHooks } from './lib/shutdown';
 const FORCE_EXIT_MS = 10_000;
 
 registerPrismaHooks(); // DB readiness check + graceful disconnect
+registerRedisHooks(); // Redis readiness check + graceful quit
 
 const app = createApp();
 const server = app.listen(env.PORT, () => {
