@@ -15,6 +15,12 @@ const envSchema = z.object({
     .default('info'),
   // Postgres connection string (Phase 1). Required — the service is DB-backed.
   DATABASE_URL: z.string().url(),
+  // Auth (Phase 3). Access tokens are signed JWTs; refresh tokens are opaque.
+  JWT_ACCESS_SECRET: z.string().min(16),
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900), // 15 min
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(7),
+  // Allowed browser origin for CORS (the devmentor frontend).
+  CORS_ORIGIN: z.string().url().default('http://localhost:3000'),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -80,14 +80,14 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **2.5** ✅ **Done** — Error envelope, 404 / method-not-allowed, versioning. *What was done:* added `src/middleware/methodNotAllowed.ts` (sets `Allow` header, throws 405 `METHOD_NOT_ALLOWED`), wired `router.all(...)` after the GET handlers on course (`/`, `/:slug`) and lesson (`/:id`) routes; extended `errorHandler` to map express.json `SyntaxError` → **400 `INVALID_JSON`**; added a `GET /api` version index. **Verify:** `tsc --noEmit` passes; live run — GET 200, POST→405 (`Allow: GET`), malformed JSON→400 INVALID_JSON, `/api` index 200, unknown path→404, all in the uniform envelope. → *Lesson captured: finishing the contract edges — 405, malformed input, versioning.*
 - **2.6** ✅ **Done** — **ADR-0003** (REST chosen) + Phase 2 course module + trackers. *What was done:* wrote `docs/adr/0003-rest-api-style.md` (REST vs GraphQL vs tRPC — full problem/options/decision/consequences); added the **`bb-api-design`** module (Phase 2) to `backend-build-curriculum.ts` with **5 lessons** (versioned REST/OpenAPI, validate+DTO, layered endpoints, list vs detail, contract edges) from `course-notes.md`; auto-registered via the track export + home tab. Updated README phase tracker (Phase 2 ✅) + ADR index. Verified `tsc --noEmit` passes in `devmentor`. **Phase 2 complete (6/6).**
 
-## Phase 3 — Authentication & Security · 🟡 In progress
+## Phase 3 — Authentication & Security · ✅ Complete
 - **3.1** ✅ **Done** — Password hashing (argon2) + credentials on `User`. *What was done:* added `argon2` dep; added nullable `passwordHash` to the `User` model; created `src/modules/auth/password.ts` (`hashPassword`/`verifyPassword` using **argon2id**, OWASP params ~19MiB/t2/p1, fails closed on malformed hash); seeded the demo user with a dev password (`password123`). **Verify (full):** argon2 installed + ran in sandbox — hash is `$argon2id$…`, verify correct→true / wrong→false / garbage→false (no throw), salts random (two hashes differ); `password.ts` typechecks; schema + seed checks pass. ⚠️ Host: `pnpm install` (builds argon2 native) + `pnpm db:migrate`. → *Lesson captured: password hashing done right (argon2id).*
-- **3.2** JWT access/refresh issuance + `RefreshToken` table (hashed). → *Lesson: JWT internals & token design.*
-- **3.3** `register` / `login` / `me` endpoints. → *Lesson: the auth flow.*
-- **3.4** Refresh rotation + reuse detection + `logout`. → *Lesson: refresh rotation & theft detection.*
-- **3.5** `requireAuth` + RBAC middleware. → *Lesson: authorization & RBAC.*
-- **3.6** Hardening: helmet, CORS (credentials), rate limiting. → *Lesson: OWASP baseline.*
-- **3.7** **ADR-0004** (custom JWT vs Auth.js) + Phase 3 course module + trackers.
+- **3.2** ✅ **Done** — JWT access/refresh issuance + `RefreshToken` table (hashed). *What was done:* added `jsonwebtoken` (+types); env vars `JWT_ACCESS_SECRET`/`ACCESS_TOKEN_TTL_SECONDS`/`REFRESH_TOKEN_TTL_DAYS` (+ `.env.example`); `RefreshToken` model (`tokenHash @unique`, `expiresAt`, `revokedAt`) + `User.refreshTokens`; `src/modules/auth/tokens.ts` (`signAccessToken`/`verifyAccessToken` short-lived JWT; `generateRefreshToken` opaque 256-bit + sha256 hash; `hashToken`; `refreshTokenExpiry`). **Verify (full):** typecheck passes; runtime — JWT roundtrip ok, tampered token rejected, refresh token 43-char base64url, hash sha256-hex deterministic & ≠ token, expiry ~7d; schema checks pass. ⚠️ Host: `pnpm install` + `pnpm db:migrate`. → *Lesson captured: two-token auth (access JWT + opaque hashed refresh).*
+- **3.3** ✅ **Done** — `register` / `login` / `me` endpoints. *What was done:* `auth.repository.ts` (find/create user, create/find/revoke refresh tokens), `auth.service.ts` (register hashes+creates+issues tokens; login with **uniform** invalid-credentials error; getMe), `auth.schema.ts`, `auth.controller.ts` (access token in body, refresh token in **httpOnly cookie** scoped to `/api/v1/auth`; 201 on register), `auth.openapi.ts`, `auth.routes.ts`; mounted at `/api/v1/auth`. → *Lesson captured: the auth flow.*
+- **3.4** ✅ **Done** — Refresh rotation + reuse detection + `logout`. *What was done:* `auth.service.refresh` rotates (revoke old → issue new) and on a **revoked-token replay** revokes **all** the user's tokens (theft response); expiry checked; `logout` revokes current; `/auth/refresh` + `/auth/logout` routes read/clear the cookie. → *Lesson captured: rotation & reuse detection.*
+- **3.5** ✅ **Done** — `requireAuth` + RBAC middleware. *What was done:* `src/middleware/requireAuth.ts` (stateless Bearer JWT verify → `req.auth = { userId, role }`; `requireRole(...)`), role added to the access-token payload + `Role` enum/`User.role` in schema, `src/types/express.d.ts` augmentation; `/auth/me` guarded. **Verify (full runtime):** no token→401, USER→200 with req.auth, ADMIN-only+USER→403, ADMIN→200. → *Lesson captured: stateless auth middleware & RBAC.*
+- **3.6** ✅ **Done** — Hardening: helmet, CORS (credentials), rate limiting. *What was done:* `app.ts` now uses **helmet**, **cors** (`origin: CORS_ORIGIN`, `credentials: true`), **cookie-parser**, `trust proxy`, and `authRateLimiter` (`src/middleware/rateLimit.ts`, express-rate-limit → 429 via envelope) on `/api/v1/auth`; `CORS_ORIGIN` env added. **Verify:** rate limiter → 429 after 20 hits (runtime). → *Lesson captured: security hardening.*
+- **3.7** ✅ **Done** — **ADR-0004** (custom JWT vs Auth.js) + Phase 3 course module + trackers. *What was done:* wrote `docs/adr/0004-custom-jwt-auth.md`; added the **`bb-auth-security`** module (Phase 3) with **6 lessons** (password hashing, two-token auth, auth flow, rotation/reuse, RBAC, hardening) to `backend-build-curriculum.ts`; updated README + ADR index; `tsc --noEmit` passes in `devmentor`. **Verify:** whole prisma-free surface typechecks; DB-touching auth files syntax-check. ⚠️ Host: `pnpm install` + `pnpm db:migrate` (adds `role`, `RefreshToken`), then exercise register/login/refresh/me. **Phase 3 complete (7/7).**
 
 ## Phase 4 — Caching & Read Performance (Redis) · ☐ Pending
 - **4.1** Redis client + readiness wiring. → *Lesson: why a shared cache (not in-process).*
@@ -189,7 +189,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 0 — Foundations | 8 | 8 | ✅ Complete |
 | 1 — Data modeling | 6 | 6 | ✅ Complete |
 | 2 — API design | 6 | 6 | ✅ Complete |
-| 3 — Auth & security | 7 | 1 | 🟡 In progress |
+| 3 — Auth & security | 7 | 7 | ✅ Complete |
 | 4 — Caching (Redis) | 5 | 0 | ☐ |
 | 5 — Concurrency | 6 | 0 | ☐ |
 | 6 — Queues (BullMQ) | 4 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Task 3.1 complete — argon2id password hashing + nullable passwordHash on User (Phase 2 complete; Phase 3 underway)._
+_Last updated: Phase 3 complete (Tasks 3.3–3.7) — full auth: register/login/me, refresh rotation + reuse detection, requireAuth + RBAC, helmet/CORS/rate-limit hardening, ADR-0004 + Phase 3 course module. Next: Phase 4 — Caching & Read Performance (Redis)._

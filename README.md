@@ -85,7 +85,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | 0 | Foundations & project setup | ✅ | [0001](./docs/adr/0001-foundational-stack.md) | [Phase 0 module](../devmentor/src/data/backend-build-curriculum.ts) (7 lessons) | — |
 | 1 | Data modeling & persistence | ✅ | [0002](./docs/adr/0002-postgres-prisma-data-modeling.md) | [Phase 1 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
 | 2 | API design & validation | ✅ | [0003](./docs/adr/0003-rest-api-style.md) | [Phase 2 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
-| 3 | Authentication & security | ⬜ | — | — | — |
+| 3 | Authentication & security | ✅ | [0004](./docs/adr/0004-custom-jwt-auth.md) | [Phase 3 module](../devmentor/src/data/backend-build-curriculum.ts) (6 lessons) | — |
 | 4 | Caching & read performance (Redis) | ⬜ | — | — | — |
 | 5 | Concurrency & consistency | ⬜ | — | — | — |
 | 6 | Async processing & queues (BullMQ) | ⬜ | — | — | — |
@@ -112,6 +112,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | [0001](./docs/adr/0001-foundational-stack.md) | Foundational stack & project shape | 0 | Accepted |
 | [0002](./docs/adr/0002-postgres-prisma-data-modeling.md) | PostgreSQL + Prisma, normalized + JSONB | 1 | Accepted |
 | [0003](./docs/adr/0003-rest-api-style.md) | REST as the API style (over GraphQL/tRPC) | 2 | Accepted |
+| [0004](./docs/adr/0004-custom-jwt-auth.md) | Custom JWT auth (over Auth.js/managed) | 3 | Accepted |
 
 ---
 

@@ -747,3 +747,142 @@ the parameters embedded in each existing hash.
 **Quiz idea.** *Why use a slow, memory-hard hash (argon2id) instead of SHA-256 for passwords?* → A fast
 hash can be brute-forced billions of times per second on a GPU; argon2id is deliberately slow and
 memory-hard, making large-scale guessing economically infeasible while staying cheap for a single login.
+
+### Lesson (Task 3.2): Two-Token Auth — Access JWT + Opaque Refresh (Stored Hashed)
+
+**The Problem.** We want authentication that's **stateless** (no DB hit to verify every request) yet
+**revocable** (log out, kill a stolen session). A single long-lived JWT can't be revoked and, if stolen,
+stays valid until it expires. Pure server sessions are revocable but require a DB lookup on every request.
+
+**Options on the table.**
+- *Server sessions (opaque id → DB row)* — easily revoked, but a DB lookup per request.
+- *One long-lived JWT* — stateless, but unrevocable and dangerous if leaked.
+- *Two tokens: short-lived access JWT + long-lived refresh token* — stateless requests + revocable sessions. (chosen)
+
+**Decision & Why.** Issue a **short-lived access JWT** (~15 min, verified by signature — no DB lookup) and
+a **long-lived, opaque, random refresh token** (~7 days). We store only the **sha256 hash** of the refresh
+token, never the token itself. Stateless access keeps requests fast; the short TTL caps a stolen access
+token's usefulness; the refresh token is **revocable and rotatable** (Phase 3.4). Storing only the hash
+means a DB leak can't be replayed to mint sessions.
+
+**Implementation.**
+```ts
+// access: signed, short-lived, stateless
+export const signAccessToken = (p: { sub: string }) =>
+  jwt.sign(p, env.JWT_ACCESS_SECRET, { expiresIn: env.ACCESS_TOKEN_TTL_SECONDS });
+
+// refresh: opaque 256-bit random; store only its hash
+export function generateRefreshToken() {
+  const token = randomBytes(32).toString('base64url');
+  return { token, tokenHash: createHash('sha256').update(token).digest('hex') };
+}
+```
+`RefreshToken` table stores `{ userId, tokenHash @unique, expiresAt, revokedAt }`.
+
+**Pitfalls.** Never store the raw refresh token — store its hash (like a password). The refresh token must
+be **high-entropy random**, not a JWT (so it's opaque and revocable, not self-validating). Keep the access
+TTL short to limit theft impact. Use a long, random `JWT_ACCESS_SECRET`. Don't put secrets or sensitive
+data in the JWT payload — it's signed, not encrypted, so anyone can read it.
+
+**Quiz idea.** *Why store only the sha256 hash of the refresh token, and why make access tokens short-lived
+while refresh tokens are long-lived?* → Storing the hash means a DB leak can't be replayed to forge
+sessions (like password hashing). A short access TTL limits the damage of a stolen access token, while the
+long-lived refresh token (revocable, rotated) provides a smooth session without frequent re-login.
+
+### Lesson (Task 3.3): The Auth Flow — Register, Login, Me
+
+**The Problem.** Turn credentials into a session safely. Two subtle traps: **where the tokens go** in the
+browser (the wrong place invites XSS token theft), and **login error messages** that reveal which emails are
+registered (user enumeration).
+
+**Decision & Why.** `register` checks the email is free, hashes the password, creates the user (+ its stats
+row), and issues tokens. `login` looks up the user and verifies the password, returning a **uniform**
+"Invalid email or password" whether the email is unknown or the password is wrong. Tokens are split by
+storage: the **access token goes in the JSON body** (client keeps it in memory), the **refresh token in an
+httpOnly, SameSite cookie** scoped to `/api/v1/auth` (JS can't read it; only sent where needed). `me` is
+protected by `requireAuth`. Responses never include `passwordHash`.
+
+```ts
+res.cookie('refresh_token', token, { httpOnly: true, secure: isProduction, sameSite: 'lax', path: '/api/v1/auth' });
+res.status(201).json({ user, accessToken }); // access token in body, refresh in cookie
+```
+
+**Pitfalls.** Return the **same** error for unknown-email and wrong-password (don't leak which emails exist).
+Never store the refresh token in `localStorage` — an httpOnly cookie survives XSS reads. Strip sensitive
+fields (`passwordHash`) from every response. Use 201 for register, 200 for login.
+
+**Quiz idea.** *Why return an identical "invalid email or password" for both an unknown email and a wrong
+password?* → To prevent user enumeration — distinct errors would let an attacker discover which emails have
+accounts.
+
+### Lesson (Task 3.4): Refresh Rotation & Reuse Detection
+
+**The Problem.** A long-lived refresh token is powerful: if stolen, it can mint access tokens indefinitely.
+We need to both limit that and **detect** theft.
+
+**Decision & Why.** **Rotate** on every refresh: revoke the presented token and issue a brand-new one. Keep
+revoked tokens (mark `revokedAt`, don't delete) so we can spot **reuse**: if an already-rotated (revoked)
+token is presented again, the legitimate client and an attacker both hold copies — treat it as theft and
+**revoke all** of that user's tokens, forcing a full re-login.
+
+```ts
+if (stored.revokedAt) { await revokeAllUserRefreshTokens(stored.userId); throw AppError.unauthorized('reuse detected'); }
+if (stored.expiresAt < new Date()) throw AppError.unauthorized('expired');
+await revokeRefreshToken(stored.id);          // rotate
+return issueTokens(user);                      // new pair
+```
+
+**Pitfalls.** Store the **hash**, not the token. **Mark revoked, don't delete** — you need the record to
+detect reuse. Always check expiry. `logout` revokes the current token. Rotation means the client must always
+use the newest refresh token (it's set fresh in the cookie each time).
+
+**Quiz idea.** *What does presenting an already-rotated (revoked) refresh token indicate, and how should the
+server respond?* → Likely token theft (two parties hold the same token) — revoke all the user's refresh
+tokens to force re-login, invalidating the attacker's copy too.
+
+### Lesson (Task 3.5): Stateless Auth Middleware & RBAC
+
+**The Problem.** Protect routes and enforce permissions — ideally without a database lookup on every single
+request.
+
+**Decision & Why.** `requireAuth` verifies the access token's **signature** (stateless — no DB) and attaches
+the principal as `req.auth = { userId, role }`. `requireRole(...roles)` checks that role afterward. The
+**role is embedded in the access token**, so authorization needs no lookup; the short access TTL bounds how
+stale that role can be. We distinguish **401** (not authenticated) from **403** (authenticated but lacking
+permission).
+
+```ts
+router.delete('/x', requireAuth, requireRole('ADMIN'), handler);
+```
+
+**Pitfalls.** Because the role is in the token, a role change only takes effect when the access token
+expires (fine for short TTLs; for instant revocation, check a denylist or re-issue). Keep 401 vs 403
+distinct. `requireRole` must run **after** `requireAuth` (it reads `req.auth`). Augment the Express
+`Request` type so `req.auth` is typed.
+
+**Quiz idea.** *What's the difference between 401 and 403?* → 401 = not authenticated (no/invalid
+credentials); 403 = authenticated but not authorized (valid identity, insufficient permission).
+
+### Lesson (Task 3.6): Security Hardening — Helmet, CORS, Rate Limiting
+
+**The Problem.** A browser-facing, public API is exposed to header-based attacks, cross-origin access, and
+automated brute force / credential stuffing.
+
+**Decision & Why.** Add **helmet** (sensible secure response headers), lock **CORS** to the frontend origin
+with `credentials: true` (required so the browser sends the refresh cookie), and **rate-limit** the auth
+endpoints. Set `trust proxy` so the real client IP (not the load balancer's) is used for limiting.
+
+```ts
+app.use(helmet());
+app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
+app.use('/api/v1/auth', authRateLimiter); // 429 on abuse, via the shared envelope
+```
+
+**Pitfalls.** With `credentials: true` the CORS origin **cannot be `*`** — it must name the exact origin.
+Rate limiting by IP needs the correct client IP, so set `trust proxy` behind a proxy/LB. This limiter is
+**in-memory (per-process)** — it doesn't coordinate across replicas; a Redis-backed distributed limiter
+comes in Phase 4/5. Put helmet/CORS early in the middleware chain.
+
+**Quiz idea.** *Why can't the CORS `origin` be `*` when `credentials: true`?* → The browser forbids sending
+credentials (cookies) to a wildcard origin; you must specify the exact allowed origin for credentialed
+requests.

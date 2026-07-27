@@ -17,20 +17,40 @@ datasource db {
 // record stays lean and we don't churn it on every XP change. Auth fields
 // (password hash, refresh tokens) are added in Phase 3.
 
+enum Role {
+  USER
+  ADMIN
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
   name         String?
+  role         Role     @default(USER)
   // argon2id hash of the password. Nullable: a user may sign up via OAuth later
   // (Phase 3+) and never set a local password.
   passwordHash String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  stats       UserStats?
-  enrollments Enrollment[]
-  completions LessonCompletion[]
-  quizScores  QuizScore[]
+  stats         UserStats?
+  enrollments   Enrollment[]
+  completions   LessonCompletion[]
+  quizScores    QuizScore[]
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  // sha256 of the opaque refresh token — we store the hash, never the token itself.
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime? // set on rotation/logout (Phase 3.4)
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
 }
 
 model UserStats {

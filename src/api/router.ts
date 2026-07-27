@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { openapiDocument } from './openapi';
+import { authRouter } from '../modules/auth/auth.routes';
 import { courseRouter } from '../modules/course/course.routes';
 import { lessonRouter } from '../modules/lesson/lesson.routes';
 
@@ -49,5 +50,6 @@ apiRouter.get('/docs', (_req, res) => {
 });
 
 // Feature routers.
+apiRouter.use('/auth', authRouter);
 apiRouter.use('/courses', courseRouter);
 apiRouter.use('/lessons', lessonRouter);
