@@ -3,7 +3,8 @@ import { env } from './config/env';
 import { logger } from './lib/logger';
 import { registerPrismaHooks } from './lib/prisma';
 import { registerRedisHooks } from './lib/redis';
-import { runShutdownHooks } from './lib/shutdown';
+import { onShutdown, runShutdownHooks } from './lib/shutdown';
+import { emailQueue } from './queues/email.queue';
 
 /**
  * HTTP server bootstrap + graceful shutdown.
@@ -21,6 +22,7 @@ const FORCE_EXIT_MS = 10_000;
 
 registerPrismaHooks(); // DB readiness check + graceful disconnect
 registerRedisHooks(); // Redis readiness check + graceful quit
+onShutdown('emailQueue', () => emailQueue.close()); // close the producer queue on shutdown
 
 const app = createApp();
 const server = app.listen(env.PORT, () => {

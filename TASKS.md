@@ -104,11 +104,11 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 - **5.5** ✅ **Done** — Concurrency tests. *What was done:* `tests/concurrency.test.ts` — OCC unit tests (run anywhere) + a gated integration test firing **10 parallel** completes asserting exactly one XP award (`RUN_DB_TESTS=1` on host). **Verify:** primitives runtime-tested here; full suite via `pnpm test` on host. → *Lesson captured: testing concurrency.*
 - **5.6** ✅ **Done** — **ADR-0006** + Phase 5 course module + trackers. *What was done:* `docs/adr/0006-concurrency-strategy.md`; **`bb-concurrency`** module (5 lessons) added to `backend-build-curriculum.ts`; README + ADR index updated; `tsc --noEmit` passes in `devmentor`; clean typecheck of the whole prisma-free surface incl. the new primitives. **Phase 5 complete (6/6).**
 
-## Phase 6 — Async Processing & Queues (BullMQ) · ☐ Pending
-- **6.1** BullMQ queues + `src/worker.ts` entrypoint. → *Lesson: sync vs async; why a queue.*
-- **6.2** Sample job + retries/backoff/dead-letter. → *Lesson: retries, backoff, DLQ.*
-- **6.3** Idempotent job handlers. → *Lesson: at-least-once & idempotent consumers.*
-- **6.4** **ADR-0007** (BullMQ now, not Kafka) + Phase 6 course module + trackers.
+## Phase 6 — Async Processing & Queues (BullMQ) · ✅ Complete
+- **6.1** ✅ **Done** — BullMQ queues + `src/worker.ts` entrypoint. *What was done:* `bullmq` dep; `src/queues/connection.ts` (BullMQ Redis connection, `maxRetriesPerRequest: null`); `src/queues/email.queue.ts` (`email` Queue + `enqueueWelcomeEmail`); `src/worker.ts` (separate process, graceful drain via `worker.close()`); registration now enqueues a welcome email (non-fatal); API closes the queue on shutdown. → *Lesson captured: async processing with a job queue.*
+- **6.2** ✅ **Done** — Sample job + retries/backoff/dead-letter. *What was done:* queue `defaultJobOptions` — `attempts: 3`, exponential `backoff`, `removeOnComplete`, `removeOnFail` retained (failed set = DLQ); worker `failed`/`completed` listeners log outcomes. → *Lesson captured: retries, backoff & dead-letter.*
+- **6.3** ✅ **Done** — Idempotent job handlers. *What was done:* `email.worker.ts` guards the side-effect with a Redis `SET NX` marker (at-least-once safe) and `enqueueWelcomeEmail` uses `jobId = welcome:<userId>` to dedupe enqueues. **Verify (runtime):** 1st→sent, retry→skipped-duplicate, other user→sent. → *Lesson captured: idempotent handlers (at-least-once).*
+- **6.4** ✅ **Done** — **ADR-0007** (BullMQ now, not Kafka — with explicit Kafka graduation criteria) + Phase 6 course module (3 lessons: `bb-queues`) + trackers. **Verify:** BullMQ queue/worker/connection typecheck; auth.service + server syntax-check; `tsc --noEmit` passes in `devmentor`. ⚠️ Host: `pnpm install` + `docker compose up -d`, run `pnpm worker` alongside `pnpm dev`; register a user → worker logs "sent welcome email". **Phase 6 complete (4/4).**
 
 ## Phase 7 — Event-Driven Architecture & Outbox · ☐ Pending
 - **7.1** `OutboxEvent` table + typed event contracts. → *Lesson: the dual-write problem.*
@@ -192,7 +192,7 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 3 — Auth & security | 7 | 7 | ✅ Complete |
 | 4 — Caching (Redis) | 5 | 5 | ✅ Complete |
 | 5 — Concurrency | 6 | 6 | ✅ Complete |
-| 6 — Queues (BullMQ) | 4 | 0 | ☐ |
+| 6 — Queues (BullMQ) | 4 | 4 | ✅ Complete |
 | 7 — Events & outbox | 5 | 0 | ☐ |
 | 8 — Notifications | 5 | 0 | ☐ |
 | 9 — Timed quizzes | 7 | 0 | ☐ |
@@ -203,4 +203,4 @@ This is the **single source of truth** for building `devmentor-api` 0 → 1. We 
 | 14 — Docker | 4 | 0 | ☐ |
 | 15 — CI/CD & scaling | 5 | 0 | ☐ |
 
-_Last updated: Phase 5 complete (Tasks 5.1–5.6) — idempotency keys, OCC helper, transactional exactly-once XP, Redis distributed lock, concurrency tests, ADR-0006 + Phase 5 course module. **Milestone A (Phases 0–5, shippable MVP) complete.** Next: Phase 6 — Async Processing & Queues (BullMQ)._
+_Last updated: Phase 6 complete (Tasks 6.1–6.4) — BullMQ job queue + separate worker, retries/backoff/DLQ, idempotent at-least-once handlers, welcome-email offload, ADR-0007 + Phase 6 course module. Next: Phase 7 — Event-Driven Architecture & Outbox._

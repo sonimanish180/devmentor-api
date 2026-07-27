@@ -1,4 +1,6 @@
 import { AppError } from '../../lib/AppError';
+import { logger } from '../../lib/logger';
+import { enqueueWelcomeEmail } from '../../queues/email.queue';
 import { hashPassword, verifyPassword } from './password';
 import {
   signAccessToken,
@@ -36,6 +38,15 @@ export async function register(input: { email: string; password: string; name?: 
   }
   const passwordHash = await hashPassword(input.password);
   const user = await repo.createUser({ email: input.email, name: input.name, passwordHash });
+
+  // Offload the welcome email to the queue — don't block registration on it,
+  // and don't fail registration if enqueue hiccups.
+  try {
+    await enqueueWelcomeEmail({ type: 'welcome', userId: user.id, email: user.email });
+  } catch (err) {
+    logger.error({ err, userId: user.id }, 'failed to enqueue welcome email');
+  }
+
   return { user: toPublicUser(user), ...(await issueTokens(user)) };
 }
 

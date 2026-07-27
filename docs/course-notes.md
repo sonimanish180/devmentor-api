@@ -1115,3 +1115,86 @@ constraint/transaction behavior).
 **Quiz idea.** *Why must a concurrency test use `Promise.all` (parallel) rather than sequential requests?* →
 Sequential requests never overlap, so they can't trigger a race; only truly simultaneous requests exercise
 the locking/constraint/transaction paths where concurrency bugs live.
+
+---
+
+## Phase 6 — Async Processing & Queues (BullMQ)
+
+### Lesson (Task 6.1): Async Processing with a Job Queue
+
+**The Problem.** Some work is slow or external — sending an email, calling a third-party API, processing an
+upload. Doing it inside the request handler makes the user wait, ties up the event loop, and collapses under
+spikes; if the process crashes mid-work, the work is simply lost.
+
+**Options on the table.**
+- *Do it synchronously in the request* — simple, but slow responses and no resilience.
+- *Fire-and-forget in-process (`void doWork()`)* — response is fast, but no retries and the work is lost on crash/restart.
+- *A durable job queue (BullMQ on Redis)* — enqueue fast, process in a separate worker, with persistence + retries. (chosen)
+
+**Decision & Why.** The API **enqueues** a job and returns immediately; a separate **worker process**
+consumes it. Jobs are durable in Redis (survive restarts), retried on failure, and the worker scales
+independently of the API. Enqueue is fast and wrapped so a hiccup never fails the user's request.
+
+```ts
+await emailQueue.add('welcome', { userId, email }); // returns fast; worker sends it later
+```
+
+**Pitfalls.** Never block the request on slow/external work. Run the worker as a **separate process** (`pnpm
+worker`) so background load doesn't steal the API's event loop. Keep enqueue non-fatal to the request.
+
+**Quiz idea.** *Why move sending a welcome email to a queue instead of doing it inline during registration?*
+→ So registration responds immediately and stays resilient: the email is processed by a separate worker with
+retries, and a slow/failing mail provider can't slow down or break sign-up.
+
+### Lesson (Task 6.2): Retries, Backoff & Dead-Letter
+
+**The Problem.** Background jobs fail for transient reasons (the mail provider is briefly down). Dropping the
+job loses work; retrying instantly and forever hammers the failing dependency and can spin on a "poison"
+message.
+
+**Decision & Why.** Configure **attempts + exponential backoff** so transient failures retry with growing
+delays. When retries are exhausted, the job stays in the **failed set** (kept via `removeOnFail`) — BullMQ's
+equivalent of a **dead-letter queue** — for inspection and manual replay. Succeeded jobs are auto-removed so
+Redis doesn't fill up.
+
+```ts
+new Queue('email', { defaultJobOptions: {
+  attempts: 3,
+  backoff: { type: 'exponential', delay: 1000 },
+  removeOnComplete: { age: 3600 },
+  removeOnFail: { count: 5000 },   // exhausted jobs remain here = dead-letter
+}});
+```
+
+**Pitfalls.** Use exponential (not immediate) backoff to avoid stampeding a struggling dependency. Keep
+failed jobs for inspection rather than silently dropping them. Auto-remove completed jobs or Redis grows
+unbounded. Beware poison messages — a job that always fails will exhaust retries; monitor the failed set.
+
+**Quiz idea.** *What is a dead-letter queue and why is exponential backoff preferred over immediate retries?*
+→ A DLQ holds jobs that exhausted their retries so they aren't lost and can be inspected/replayed;
+exponential backoff spaces retries out so a briefly-failing dependency isn't hammered.
+
+### Lesson (Task 6.3): Idempotent Job Handlers (At-Least-Once)
+
+**The Problem.** Queues deliver **at-least-once**, not exactly-once: a job can run more than once (e.g. the
+worker crashes after sending the email but before acknowledging the job, so it's redelivered). A
+non-idempotent handler would send the welcome email twice.
+
+**Decision & Why.** Make handlers **idempotent**. Guard the side-effect with a one-time marker (a Redis
+`SET NX`) keyed by the business identity, so a re-run becomes a no-op. Additionally set the enqueue
+`jobId` to a business key so re-enqueues of the same logical job are deduped at insert time. Both together
+turn at-least-once delivery into an effectively once side-effect.
+
+```ts
+const first = await redis.set('job:welcome:done:' + userId, '1', 'EX', ttl, 'NX');
+if (first === null) return; // already processed — safe no-op on redelivery
+// …send the email…
+```
+
+**Pitfalls.** At-least-once ≠ exactly-once — design for redelivery. Guard *external* side-effects (email,
+charges) specifically; DB writes can lean on unique constraints instead. A `jobId` dedupes enqueues but the
+handler guard is still needed for crash-after-side-effect redelivery.
+
+**Quiz idea.** *Why must a queue job handler be idempotent?* → Queues guarantee at-least-once delivery, so a
+job may run more than once (e.g. redelivered after a crash); an idempotent handler ensures repeats don't
+duplicate the side-effect.
