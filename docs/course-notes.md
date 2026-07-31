@@ -1811,3 +1811,168 @@ score) as well as individual response shapes.
 **Quiz idea.** *Why does the deadline-enforcement test use a real short sleep instead of mocking
 `Date.now()`?* → It exercises the exact comparison `submitAttempt` performs against the real system clock in
 production, rather than a stand-in that might not catch a subtle bug in how the comparison itself is written.
+
+---
+
+## Phase 10 — Messaging at Scale (Kafka)
+
+### Lesson (Task 10.1): Log-Based Messaging vs Queues
+
+**The Problem.** BullMQ (Phase 6) is a great fit for discrete jobs with one producer and one set of
+subscribers, all living in this codebase. But by Phase 9 we have two consumers that want the exact same
+domain events for unrelated reasons — an analytics pipeline that wants to see everything, and a future
+search indexer (Phase 11) that wants the same stream independently — plus a real want for replay (rebuild a
+read model from history). A BullMQ queue deletes a job once it's processed; there's no "read the whole
+history again" for a new consumer that shows up later.
+
+**Options on the table.**
+- *Keep adding BullMQ queues, one per new consumer* — the producer has to know about and fan out to every queue explicitly; a new consumer means a producer-side change.
+- *A log-based system (Kafka): one durable, replayable topic; any number of independent consumer groups* — a new consumer just subscribes; the producer never changes. (chosen, per ADR-0007's graduation criteria being met)
+
+**Decision & Why.** Introduce Kafka specifically for the properties BullMQ doesn't have: a durable log
+(events aren't deleted after one consumer reads them) and true multi-consumer-group fan-out (each group gets
+its own full copy of the stream). BullMQ keeps doing what it's good at — the XP/notification/leaderboard
+reactions stay exactly as they were in Phases 7–9. This is addition, not migration; ADR-0007 explicitly
+deferred Kafka until criteria like these were met, and Phase 9 is where they were.
+
+**Implementation.** A single-broker, KRaft-mode (no Zookeeper) Kafka joins `docker-compose.yml` alongside
+Postgres and Redis — dev-only, since a real cluster would run 3+ brokers for replication.
+```bash
+docker compose up -d       # now also starts kafka, healthchecked via kafka-broker-api-versions.sh
+```
+
+**Pitfalls.** Don't reach for Kafka as a default message bus — it's genuinely more operational weight (a
+JVM-adjacent broker, its own client library, its own failure modes) than BullMQ-on-Redis, which is exactly
+why it was deferred until the criteria were concretely met, not adopted speculatively. A single dev-mode
+broker has none of a real cluster's durability guarantees.
+
+**Quiz idea.** *What can Kafka give a consumer that a BullMQ queue fundamentally can't?* → A durable,
+replayable log that a NEW consumer group can subscribe to later and read from the beginning (or wherever it
+chooses) — a BullMQ job is gone once processed, so a queue can't serve a consumer that didn't exist yet when
+the message was produced.
+
+### Lesson (Task 10.2): Streaming Events Out — a Second, Independent Relay
+
+**The Problem.** The transactional outbox (Phase 7) already guarantees an event is recorded exactly when its
+business change commits. Adding Kafka as a second destination for those same events shouldn't mean rewriting
+that guarantee — it should mean reusing it.
+
+**Decision & Why.** `OutboxEvent` gains a second, independent dispatch cursor, `kafkaDispatchedAt`, alongside
+the existing `dispatchedAt` the BullMQ relay uses. A second relay polls `WHERE "kafkaDispatchedAt" IS NULL`
+with the same `FOR UPDATE SKIP LOCKED` shape as the BullMQ relay, publishes a batch to one Kafka topic
+(`domain-events`, keyed by `userId` for per-user ordering), then marks its own cursor. Neither relay knows
+the other exists, and adding a third destination later is "add a column + a relay," not a rewrite of the
+first two.
+
+**Implementation.**
+```ts
+const rows = await tx.$queryRaw`
+  SELECT id, type, payload FROM "OutboxEvent"
+  WHERE "kafkaDispatchedAt" IS NULL ORDER BY "createdAt" ASC LIMIT ${BATCH_SIZE}
+  FOR UPDATE SKIP LOCKED`;                 // its OWN cursor — independent of the BullMQ relay's
+await producer.send({
+  topic: DOMAIN_EVENTS_TOPIC,
+  messages: rows.map((row) => ({
+    key: partitionKeyFor(row.payload),      // per-user ordering by default
+    value: JSON.stringify({ eventId: row.id, type: row.type, version: 1, payload: row.payload }),
+  })),
+});
+await tx.outboxEvent.updateMany({ where: { id: { in: rows.map(r => r.id) } }, data: { kafkaDispatchedAt: new Date() } });
+```
+
+**Pitfalls.** KafkaJS's `idempotent: true` producer setting dedupes broker-side retries WITHIN one producer
+session — it does NOT cover the relay process restarting and re-publishing an event it already sent before a
+crash; that's a fresh producer session outside the idempotent window. Don't mistake `idempotent: true` for
+"exactly once end to end" — consumers still need their own guard (Task 10.4). Choose the partition key
+deliberately: per-user ordering here means a consumer needing per-quiz ordering across all users would need
+a different key or a dedicated topic.
+
+**Quiz idea.** *Why does `OutboxEvent` need a separate `kafkaDispatchedAt` column instead of reusing
+`dispatchedAt`?* → The BullMQ relay and the Kafka relay are two independent consumers of the same table, each
+on its own schedule; sharing one cursor would mean whichever relay runs first "claims" a row for both
+destinations, breaking the other's independent guarantee of eventually delivering every event.
+
+### Lesson (Task 10.3): Partitions & Consumer Groups
+
+**The Problem.** Both an analytics pipeline and a future search indexer want to read every domain event, for
+completely different purposes, at their own pace. If they're implemented as workers in the SAME consumer
+group, Kafka does what it's designed to do for load-balancing — split partitions between them — which is
+exactly wrong here: it would mean each gets only PART of the stream, competing for messages instead of each
+independently seeing all of them.
+
+**Options on the table.**
+- *One consumer group, multiple worker instances* — correct for scaling THROUGHPUT of one logical consumer (each instance handles a subset of partitions); wrong for two logically different consumers that each need the full stream.
+- *One consumer group PER logical consumer* — each group gets its own copy of every message, completely independent of any other group's progress. (chosen)
+
+**Decision & Why.** `analytics-consumer` and `search-index-consumer` are each their own consumer group,
+both subscribed to the same `domain-events` topic. Kafka tracks each group's read position (offset)
+independently, so one group falling behind or restarting has zero effect on the other. This is the direct,
+concrete version of what Kafka's "multiple independent consumers" graduation criterion (ADR-0007) actually
+means in code.
+
+**Implementation.**
+```ts
+export async function startConsumer(groupId: string, topics: string[], onMessage) {
+  const consumer = kafka.consumer({ groupId });   // the group id IS the fan-out unit
+  await consumer.connect();
+  await consumer.subscribe({ topics, fromBeginning: false });
+  await consumer.run({ eachMessage: onMessage });
+}
+// two calls, two independent groups, same topic:
+startConsumer('analytics-consumer', [DOMAIN_EVENTS_TOPIC], handleAnalytics);
+startConsumer('search-index-consumer', [DOMAIN_EVENTS_TOPIC], handleSearchIndex);
+```
+
+**Pitfalls.** Reusing a consumer group id between two logically different consumers is a subtle, silent bug
+— they'd split the stream instead of each seeing all of it, and nothing about the code would look wrong at a
+glance. Rethrow from a message handler on failure — swallowing an error would let Kafka advance the offset
+past a message that was never actually processed.
+
+**Quiz idea.** *If the analytics and search-index consumers were accidentally given the SAME consumer group
+id, what would break?* → Kafka would split the topic's partitions between them as if they were two instances
+of one scaling consumer — each would see only PART of the event stream instead of both independently seeing
+every event, silently breaking both features without an obvious error.
+
+### Lesson (Task 10.4): Schema Discipline & Idempotent Consumers
+
+**The Problem.** A BullMQ queue has exactly one producer and one set of subscribers, all living in this
+codebase — `DomainEvent` (Phase 7's contract) is enough of a shared type. A Kafka topic is shared,
+longer-lived infrastructure: over time, more producers and consumers you don't directly control may read and
+write it, and a topic outlives any one deploy. And unlike BullMQ's `jobId`, Kafka gives consumers no
+producer-side dedupe across a relay restart at all.
+
+**Decision & Why.** Every message on `domain-events` is a small, versioned envelope —
+`{ eventId, type, version, payload }` — validated with zod at the consumer boundary, so an unrecognized
+shape (a future version, a bug, a stray message from something else entirely) is skipped, not a crash. Both
+consumers guard their side effect by `eventId` using the same `withEventGuard` helper from Phase 7 — but here
+it's load-bearing, not a nice-to-have: KafkaJS's idempotent producer doesn't protect against a relay
+restarting and re-publishing an already-sent event, so without the consumer-side guard, a relay crash would
+double-count analytics events or double-index search entries.
+
+**Implementation.**
+```ts
+export const domainEventEnvelope = z.object({
+  eventId: z.string().min(1),
+  type: z.string().min(1),
+  version: z.literal(1),
+  payload: z.unknown(),
+});
+export function parseEnvelope(raw) {
+  try { return domainEventEnvelope.parse(JSON.parse(raw.toString())); }
+  catch { return null; } // malformed/unknown-version — skip, never throw and crash the consumer
+}
+// each consumer's own group-scoped guard:
+await withEventGuard(redis, `kafka:${GROUP_ID}:${envelope.eventId}`, TTL, async () => { /* side effect */ });
+```
+
+**Pitfalls.** Don't assume a Kafka producer's `idempotent: true` gives you exactly-once delivery end to end —
+it only covers retries within one producer session. Don't crash a consumer on a malformed message; a shared
+topic will eventually carry something you didn't anticipate, and one bad message shouldn't halt an entire
+consumer group. Namespace idempotency keys by consumer group (`kafka:${groupId}:${eventId}`) — two different
+consumers guarding the same event need independent markers, not a shared one.
+
+**Quiz idea.** *KafkaJS's producer is configured with `idempotent: true` — why do the consumers still need
+their own `eventId` guard?* → The idempotent producer only dedupes retries within one producer session (e.g.
+a network blip). If the relay process crashes and restarts, it starts a NEW producer session and may
+re-publish an event it already sent before the crash — outside the idempotent producer's window — so the
+consumer-side guard is what actually prevents double-processing.

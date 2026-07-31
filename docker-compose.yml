@@ -1,10 +1,10 @@
 # Local dev dependencies for devmentor-api.
 # The API itself runs on the host via `pnpm dev` during development; only the
 # stateful backing services live in Docker here. (A full containerized stack —
-# api + worker + pgbouncer + kafka — arrives in Phase 14.)
+# api + worker + pgbouncer — arrives in Phase 14.)
 #
-#   docker compose up -d        # start postgres + redis
-#   docker compose ps           # both should be "healthy"
+#   docker compose up -d        # start postgres + redis + kafka
+#   docker compose ps           # all three should be "healthy"
 #   docker compose down         # stop (add -v to wipe data volumes)
 
 services:
@@ -41,6 +41,38 @@ services:
       timeout: 3s
       retries: 10
 
+  # Single-broker, KRaft-mode Kafka (no Zookeeper) — a dev-only stand-in for a
+  # real cluster (which would run 3+ brokers for replication). Introduced in
+  # Phase 10 specifically for the properties BullMQ doesn't give us: multiple
+  # INDEPENDENT consumer groups each reading every event, and a durable,
+  # replayable log (see ADR-0011's graduation criteria from ADR-0007).
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: devmentor-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "ZGV2bWVudG9yLWRldi1jbHVzdGVy" # fixed, made-up base64 id — fine for a single dev node
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
 volumes:
   pgdata:
   redisdata:
+  kafkadata:

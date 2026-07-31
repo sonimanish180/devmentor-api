@@ -190,9 +190,16 @@ model OutboxEvent {
   type         String // e.g. "LessonCompleted" — see src/events/contracts.ts
   payload      Json
   createdAt    DateTime  @default(now())
-  dispatchedAt DateTime?
+  // Two INDEPENDENT dispatch cursors on the same row (Phase 10): the BullMQ
+  // relay (Task 7.3) marks `dispatchedAt`; the Kafka relay (Task 10.2) marks
+  // `kafkaDispatchedAt`, on its own schedule, with its own poll query. One
+  // outbox, multiple downstream sinks, no coordination needed between them —
+  // adding a third sink later is "add a column + a relay," not a rewrite.
+  dispatchedAt      DateTime?
+  kafkaDispatchedAt DateTime?
 
   @@index([dispatchedAt, createdAt])
+  @@index([kafkaDispatchedAt, createdAt])
 }
 
 // ─── Notifications (ports & adapters) ─────────────────────────────────────

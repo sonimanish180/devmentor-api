@@ -32,6 +32,9 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  // Kafka (Phase 10) — comma-separated bootstrap brokers. Not a URL (no
+  // scheme), so plain string validation, split on "," by the client.
+  KAFKA_BROKERS: z.string().default('localhost:9092'),
 });
 
 export type Env = z.infer<typeof envSchema>;
