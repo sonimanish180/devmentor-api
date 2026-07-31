@@ -92,6 +92,18 @@ model Course {
   published   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // GENERATED ALWAYS AS ... STORED from title+description (Task 11.1) — the
+  // database keeps this in sync on every write, no application code needed.
+  // Prisma has no first-class tsvector type, so it's `Unsupported`: present
+  // in the schema for documentation/introspection, but queried via
+  // `$queryRaw`, never through the typed client. See the migration SQL in
+  // docs/adr/0012 / course-notes.md.
+  // The GENERATED expression and its GIN index aren't expressible in Prisma's
+  // schema DSL (no confident cross-version support for indexing an
+  // `Unsupported` column here) — both are added by hand-edited raw SQL in
+  // the migration, the same "drop to SQL where the ORM can't reach" move
+  // used for `FOR UPDATE SKIP LOCKED` in Phase 7.
+  searchVector Unsupported("tsvector")?
 
   modules     Module[]
   enrollments Enrollment[]
@@ -129,10 +141,13 @@ model Lesson {
   order       Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // Same generated-column + GIN-index approach as Course.searchVector (Task 11.1).
+  searchVector Unsupported("tsvector")?
 
   completions LessonCompletion[]
   quizScores  QuizScore[]
   timedQuiz   Quiz?
+  searchIndexEntry SearchIndexEntry?
 
   @@unique([moduleId, slug])
   @@index([moduleId])
@@ -290,4 +305,30 @@ model QuizAttempt {
 
   @@index([userId, quizId, status]) // "does this user already have an active attempt on this quiz"
   @@index([status, deadlineAt]) // the sweeper's poll query (Task 9.4)
+}
+
+// ─── Search read model (Phase 11) ─────────────────────────────────────────
+// A denormalized, CQRS-lite read model, one row per lesson, carrying enough
+// course/module context to render a search hit without extra joins at read
+// time. Its CONTENT (titles, descriptions, course context) comes from a bulk
+// rebuild (`reindexSearch()`, Task 11.3) — there's no course/lesson-authoring
+// event stream yet to drive it incrementally. Its RANKING SIGNAL
+// (`completionCount`) IS maintained incrementally, event-drivenly, from real
+// `LessonCompleted` events via the Kafka search-index-consumer (Task 10.3,
+// given real behavior in Task 11.3). A rebuild must never reset
+// `completionCount` — it's owned by the event path, not the bulk path.
+model SearchIndexEntry {
+  id              String   @id @default(cuid())
+  lessonId        String   @unique
+  lesson          Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  courseSlug      String
+  courseTitle     String
+  lessonSlug      String
+  lessonTitle     String
+  description     String?
+  level           Level
+  completionCount Int      @default(0)
+  updatedAt       DateTime @updatedAt
+
+  @@index([completionCount])
 }

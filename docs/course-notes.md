@@ -1976,3 +1976,132 @@ their own `eventId` guard?* → The idempotent producer only dedupes retries wit
 a network blip). If the relay process crashes and restarts, it starts a NEW producer session and may
 re-publish an event it already sent before the crash — outside the idempotent producer's window — so the
 consumer-side guard is what actually prevents double-processing.
+
+---
+
+## Phase 11 — Search & Content Delivery
+
+### Lesson (Task 11.1): Full-Text Search Basics — Let the Database Keep It in Sync
+
+**The Problem.** Learners need to find courses and lessons by free-text query, not just browse the tree.
+Naive approaches — `LIKE '%query%'` scans, or fetching everything and filtering in application code — don't
+rank by relevance and don't use an index, so they get slower as the catalog grows.
+
+**Options on the table.**
+- *`LIKE`/`ILIKE` pattern matching* — simple, but no relevance ranking, no real index usage for leading wildcards, and no notion of "these words are related" (stemming, plurals).
+- *Postgres full-text search: `tsvector` + `tsquery` + a GIN index* — built into the database already running, ranks by relevance, stems words, uses a real index. (chosen)
+- *A dedicated search engine from day one* — richer features, but new infrastructure before the catalog is anywhere near the scale that would justify it (see the ADR).
+
+**Decision & Why.** Add a `GENERATED ALWAYS AS ... STORED` `tsvector` column to `Course` and `Lesson`
+(from `title` + `description`), with a GIN index for fast matching. Because it's a GENERATED column,
+**Postgres keeps it in sync on every write automatically** — no application code has to remember to update a
+search index when a title changes. Prisma has no first-class type for this, so the column is declared as
+`Unsupported("tsvector")` (present in the schema for documentation, queried only via `$queryRaw`), and the
+actual generated expression + GIN index are hand-written SQL in the migration.
+
+**Implementation.**
+```sql
+ALTER TABLE "Lesson" ADD COLUMN "searchVector" tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', coalesce(title, '') || ' ' || coalesce(description, ''))) STORED;
+
+CREATE INDEX "Lesson_searchVector_idx" ON "Lesson" USING GIN ("searchVector");
+```
+
+**Pitfalls.** A GENERATED column can't be written to directly by the app (Postgres rejects it) — that's the
+point, but worth knowing before you try to "fix" a stale-looking value by writing to it. Prisma's schema DSL
+can't express the `GENERATED ... STORED` expression itself, only that the column exists — the real definition
+lives in the migration SQL, not the schema file. Keep the tsvector's source columns (title, description)
+free of markup/JSON — feeding it JSONB `blocks` directly would need `jsonb_to_tsvector` and more thought
+about what should even be searchable.
+
+**Quiz idea.** *Why declare `searchVector` as `Unsupported("tsvector")` in schema.prisma instead of leaving it
+out of the schema entirely?* → It documents the column's existence for anyone reading the schema (and for
+introspection), while being explicit that Prisma's typed client can't read/write it directly — all access
+goes through `$queryRaw`, where the actual SQL is visible.
+
+### Lesson (Task 11.2): Relevance & Ranking — One Query, Not a Merge in JavaScript
+
+**The Problem.** Search results need to come from two tables (courses and lessons), ranked together by
+relevance, and paginated. Fetching matches from each table separately and merging/sorting/slicing them in
+application code would mean over-fetching (you don't know how many of each type you need until you've
+ranked them all) and reimplementing what a database is already good at.
+
+**Decision & Why.** One `UNION ALL` query ranks courses and lessons together with `ts_rank`, and Postgres
+itself sorts and paginates via `ORDER BY rank DESC LIMIT/OFFSET` — never merged/sliced in JavaScript.
+`COUNT(*) OVER()` rides along on every row so the total for pagination metadata comes from this one query.
+Lesson results get a small, capped popularity boost from `SearchIndexEntry.completionCount` (Task 11.3):
+`ts_rank(...) + LEAST(0.3, ln(1 + completionCount) * 0.05)` — logarithmic so popularity has diminishing
+returns, and capped so it can nudge rankings without ever overriding text relevance. Pagination here is
+**offset-based, deliberately breaking the keyset-everywhere rule from Task 1.5**: keyset needs a stable,
+orderable cursor column, and `rank` is a computed float with no such column to build one from; search result
+sets are also small and rarely paged deep, so offset's O(n)-at-depth cost never actually bites.
+
+**Implementation.**
+```sql
+SELECT *, COUNT(*) OVER() AS "totalCount" FROM (
+  SELECT 'course'::text AS type, id, slug, title, description, slug AS "courseSlug",
+         ts_rank("searchVector", plainto_tsquery('english', $1)) AS rank
+  FROM "Course" WHERE published = true AND "searchVector" @@ plainto_tsquery('english', $1)
+  UNION ALL
+  SELECT 'lesson'::text AS type, l.id, l.slug, l.title, l.description, c.slug AS "courseSlug",
+         ts_rank(l."searchVector", plainto_tsquery('english', $1))
+           + LEAST(0.3, ln(1 + coalesce(si."completionCount", 0)) * 0.05) AS rank
+  FROM "Lesson" l JOIN "Module" m ON m.id = l."moduleId" JOIN "Course" c ON c.id = m."courseId"
+  LEFT JOIN "SearchIndexEntry" si ON si."lessonId" = l.id
+  WHERE c.published = true AND l."searchVector" @@ plainto_tsquery('english', $1)
+) hits ORDER BY rank DESC LIMIT $2 OFFSET $3
+```
+
+**Pitfalls.** Use `plainto_tsquery` for free-text user input, not `to_tsquery` — the latter interprets
+`&`/`|`/`!` as operators, letting a user's search string accidentally (or deliberately) build a different
+query than intended. Don't merge and sort two separately-paginated queries in application code — push the
+`ORDER BY`/`LIMIT`/`OFFSET` into the single unioned query so the database, not your Node process, does the
+sorting. Cap any popularity/boost term so it nudges rather than dominates text relevance.
+
+**Quiz idea.** *Why is this search endpoint offset-paginated instead of keyset-paginated, breaking the rule
+established in Task 1.5?* → Keyset pagination needs a stable, orderable cursor column; here rows are sorted
+by a computed, floating-point `ts_rank` value with no real column to build a cursor from, and search results
+are small/rarely-deep-paged enough that offset's cost-at-depth is never actually a problem in practice.
+
+### Lesson (Task 11.3): CQRS-Lite Read Models — Split by What Actually Drives Each Part
+
+**The Problem.** A search result needs richer, denormalized information (course context, a popularity
+signal) than a single generated `tsvector` column can hold — and different parts of that information change
+for entirely different reasons. Course/lesson titles change rarely and there's no event stream for content
+edits (there's no authoring API yet — content is seeded). Completion counts, on the other hand, change
+constantly and there IS a real event for that: `LessonCompleted`.
+
+**Decision & Why.** `SearchIndexEntry` is a denormalized read model, one row per lesson. Its **descriptive
+content** (title, course context) is populated by `reindexSearch()`, a bulk rebuild — the honest choice given
+there's no content-change event stream to drive it incrementally yet. Its **ranking signal**
+(`completionCount`) IS maintained incrementally and event-drivenly: the Phase 10 search-index-consumer
+scaffold (previously a stub) now increments it on every `LessonCompleted` event. Critically, the bulk rebuild
+never resets `completionCount` — the two paths own different fields, and neither clobbers the other.
+
+**Implementation.**
+```ts
+// bulk path (Task 11.3) — descriptive content, never touches completionCount
+await prisma.searchIndexEntry.upsert({
+  where: { lessonId },
+  create: { lessonId, courseSlug, courseTitle, lessonSlug, lessonTitle, description, level },
+  update: { courseSlug, courseTitle, lessonSlug, lessonTitle, description, level }, // no completionCount here
+});
+
+// event-driven path — completionCount only, on every LessonCompleted
+const updated = await prisma.searchIndexEntry.updateMany({
+  where: { lessonId }, data: { completionCount: { increment: 1 } },
+});
+if (updated.count === 0) { /* row doesn't exist yet — create it with completionCount: 1 */ }
+```
+
+**Pitfalls.** A read model doesn't have to be 100% event-sourced to be a legitimate CQRS-lite pattern — mixing
+a bulk baseline with incremental event-driven enrichment is common and honest when only PART of the write
+path is actually event-driven yet. Never let a bulk rebuild silently reset a field owned by an incremental
+process, or you'll watch a popularity signal mysteriously reset every time content is reseeded. Handle the
+"row doesn't exist yet" case explicitly (a lesson completed before its first reindex) rather than letting an
+`updateMany` that matches zero rows silently drop the signal.
+
+**Quiz idea.** *Why does `reindexSearch()`'s upsert never include `completionCount` in its `update` clause?*
+→ `completionCount` is owned by the event-driven path (incremented by the search-index-consumer on
+`LessonCompleted`); if the bulk rebuild's update also touched it, every reindex would silently reset
+accumulated popularity data back to whatever the create-time default was.

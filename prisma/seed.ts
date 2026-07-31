@@ -1,5 +1,6 @@
 import { PrismaClient, Level } from '@prisma/client';
 import { hashPassword } from '../src/modules/auth/password';
+import { reindexSearch } from '../src/modules/search/reindex';
 
 const prisma = new PrismaClient();
 
@@ -105,11 +106,16 @@ async function main() {
     create: { userId: user.id, lessonId: intro.id, bestScore: 100, attempts: 1 },
   });
 
+  // Populate the search read model (Task 11.3) so a fresh dev DB is
+  // immediately searchable, not just browsable.
+  const indexed = await reindexSearch(prisma);
+
   console.log('Seed complete:', {
     user: user.email,
     course: course.slug,
     module: mod.slug,
     lessons: [intro.slug, next.slug],
+    searchIndexed: indexed,
   });
 }
 
