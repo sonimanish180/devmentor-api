@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './lib/logger';
@@ -5,6 +6,7 @@ import { registerPrismaHooks } from './lib/prisma';
 import { registerRedisHooks } from './lib/redis';
 import { onShutdown, runShutdownHooks } from './lib/shutdown';
 import { emailQueue } from './queues/email.queue';
+import { startRealtimeGateway } from './realtime/gateway';
 
 /**
  * HTTP server bootstrap + graceful shutdown.
@@ -28,6 +30,16 @@ const app = createApp();
 const server = app.listen(env.PORT, () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'devmentor-api listening');
 });
+
+// Realtime WebSocket gateway (Phase 8) — a scaffold behind a flag. Off by
+// default: no WS server, no extra Redis pub/sub connection, until a feature
+// actually needs live push. `startRealtimeGateway` needs the http.Server
+// instance itself (to attach the WS upgrade handler), so it's wired here.
+if (env.REALTIME_ENABLED) {
+  const realtimeGateway = startRealtimeGateway(server);
+  onShutdown('realtimeGateway', () => realtimeGateway.stop());
+  logger.info('realtime gateway enabled (WebSocket + Redis pub/sub)');
+}
 
 let shuttingDown = false;
 

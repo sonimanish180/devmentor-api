@@ -4,11 +4,12 @@ import { redis } from '../lib/redis';
 import { logger } from '../lib/logger';
 import { prisma } from '../lib/prisma';
 import { withEventGuard } from '../lib/eventGuard';
+import { notify } from '../notifications';
 import type { DomainEventJob } from './events.queue';
 import type { LessonCompletedPayload } from '../events/contracts';
 
 // Long enough to outlive any realistic retry/backoff window or DLQ replay.
-const XP_GUARD_TTL_SECONDS = 30 * 24 * 3600;
+const GUARD_TTL_SECONDS = 30 * 24 * 3600;
 
 /**
  * The first subscriber: awards XP when a `LessonCompleted` event arrives.
@@ -23,7 +24,7 @@ const XP_GUARD_TTL_SECONDS = 30 * 24 * 3600;
  * fix as Task 6.3, just keyed by event instead of business id.
  */
 async function handleLessonCompleted(eventId: string, payload: LessonCompletedPayload): Promise<void> {
-  const result = await withEventGuard(redis, `event:xp-awarded:${eventId}`, XP_GUARD_TTL_SECONDS, async () => {
+  const result = await withEventGuard(redis, `event:xp-awarded:${eventId}`, GUARD_TTL_SECONDS, async () => {
     await prisma.userStats.update({
       where: { userId: payload.userId },
       data: { totalXP: { increment: payload.xp } }, // still an atomic increment, not read-modify-write
@@ -37,14 +38,46 @@ async function handleLessonCompleted(eventId: string, payload: LessonCompletedPa
   }
 }
 
+/**
+ * The SECOND subscriber to the exact same `LessonCompleted` event (Task 8.2) —
+ * added without touching `completeLesson`, the relay, or the first
+ * subscriber at all. That's the payoff of Phase 7's outbox: reacting to a
+ * domain event in a new way is purely additive. Guarded the same shape as
+ * `handleLessonCompleted`, but on its own key — a redelivery that's already
+ * skipped for XP purposes must still be evaluated for notification purposes
+ * (and vice versa), since the two guards protect two independent side effects.
+ */
+async function notifyLessonCompleted(eventId: string, payload: LessonCompletedPayload): Promise<void> {
+  const result = await withEventGuard(redis, `event:notified:${eventId}`, GUARD_TTL_SECONDS, async () => {
+    await notify({
+      userId: payload.userId,
+      type: 'LessonCompleted',
+      title: 'Lesson complete! 🎉',
+      body: `You earned ${payload.xp} XP.`,
+      data: { lessonId: payload.lessonId, xp: payload.xp },
+    });
+  });
+
+  if (result === 'skipped-duplicate') {
+    logger.info({ eventId }, 'LessonCompleted: notification already sent for this event — skipping duplicate');
+  }
+}
+
 export function startEventsWorker(): Worker<DomainEventJob> {
   const worker = new Worker<DomainEventJob>(
     'events',
     async (job) => {
       switch (job.data.type) {
-        case 'LessonCompleted':
-          await handleLessonCompleted(job.data.eventId, job.data.payload as LessonCompletedPayload);
+        case 'LessonCompleted': {
+          const payload = job.data.payload as LessonCompletedPayload;
+          // Two independent subscribers react to the one event; neither knows
+          // the other exists, and adding a third is one more branch here.
+          await Promise.all([
+            handleLessonCompleted(job.data.eventId, payload),
+            notifyLessonCompleted(job.data.eventId, payload),
+          ]);
           break;
+        }
         default:
           logger.warn(
             { type: job.data.type, eventId: job.data.eventId },

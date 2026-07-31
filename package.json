@@ -34,6 +34,7 @@
     "jsonwebtoken": "^9.0.2",
     "pino": "^9.3.2",
     "pino-http": "^10.2.0",
+    "ws": "^8.18.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -44,6 +45,7 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.14.15",
     "@types/supertest": "^6.0.2",
+    "@types/ws": "^8.5.12",
     "eslint": "^9.9.0",
     "ioredis-mock": "^8.9.0",
     "prisma": "^5.18.0",
@@ -51,7 +53,8 @@
     "tsx": "^4.17.0",
     "typescript": "^5.5.4",
     "typescript-eslint": "^8.1.0",
-    "vitest": "^2.0.5"
+    "vitest": "^2.0.5",
+    "dotenv": "^16.4.3"
   },
   "engines": {
     "node": ">=20"

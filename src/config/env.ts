@@ -23,6 +23,15 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().url().default('http://localhost:3000'),
   // Redis (Phase 4) — cache, locks, and later pub/sub + queues.
   REDIS_URL: z.string().url().default('redis://localhost:6379'),
+  // Realtime WebSocket gateway (Phase 8), off by default — it's a scaffold,
+  // not yet load-bearing for any feature. NOTE: intentionally NOT
+  // `z.coerce.boolean()` — that coerces ANY non-empty string (including the
+  // literal text "false") to `true`, a classic env-flag footgun. An enum +
+  // explicit transform is the safe way to parse a boolean-shaped env var.
+  REALTIME_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type Env = z.infer<typeof envSchema>;

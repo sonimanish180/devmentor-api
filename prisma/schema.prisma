@@ -38,6 +38,8 @@ model User {
   completions   LessonCompletion[]
   quizScores    QuizScore[]
   refreshTokens RefreshToken[]
+  notifications Notification[]
+  notificationPreference NotificationPreference?
 }
 
 model RefreshToken {
@@ -189,4 +191,38 @@ model OutboxEvent {
   dispatchedAt DateTime?
 
   @@index([dispatchedAt, createdAt])
+}
+
+// ─── Notifications (ports & adapters) ─────────────────────────────────────
+// `Notification` is the durable, in-app record — always written, regardless
+// of which other channels (email, realtime/WebSocket) also fire. Those other
+// channels are ADAPTERS behind one `Notifier` port (src/notifications/); this
+// table's shape doesn't change when a new channel is added. `type` mirrors
+// the domain event that caused it (e.g. "LessonCompleted"), so the client can
+// render different notification kinds without a schema change.
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String
+  data      Json? // extra structured payload for the client, e.g. { lessonId, xp }
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt]) // history, newest first
+  @@index([userId, readAt]) // unread-count / bell badge
+}
+
+// Per-user channel toggles (Task 8.4). One row per user; a missing row means
+// "use the defaults" (see src/notifications/preferences.ts) so shipping this
+// model needs no backfill migration for existing users.
+model NotificationPreference {
+  userId          String   @id
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  inAppEnabled    Boolean  @default(true)
+  realtimeEnabled Boolean  @default(true)
+  emailEnabled    Boolean  @default(true)
+  updatedAt       DateTime @updatedAt
 }

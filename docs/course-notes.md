@@ -1396,3 +1396,174 @@ whatever it does) never lands.
 idempotent, independent of which subscriber or business key is involved — keying on the event id means any
 current or future subscriber can safely dedupe redelivery of that specific event, without assuming anything
 about how often the underlying business action can occur.
+
+---
+
+## Phase 8 — Notifications (Multi-Channel, Realtime-Ready)
+
+### Lesson (Task 8.1): Ports & Adapters for Notifications
+
+**The Problem.** Users need to learn about things asynchronously — a lesson completed, XP earned, and soon
+more event types and more channels (email, push). If "send a notification" is written directly as "insert a
+row into a table" at every call site, adding a second channel later means finding and editing every one of
+those call sites, and the business logic that triggers a notification becomes tangled with the mechanics of
+delivering it.
+
+**Options on the table.**
+- *Direct, channel-specific calls at each call site* — simple today, but every new channel means editing every trigger point.
+- *One function with hard-coded per-channel logic inside it* — centralizes the fan-out, but grows a conditional per channel, mixing data access, delivery, and (later) preference checks in one place.
+- *Ports & adapters: a `Notifier` interface, adapters behind it* — callers depend only on `notify(message)`; each channel is an adapter implementing the same small interface. (chosen)
+
+**Decision & Why.** Define a `Notifier` port — `send(message): Promise<void>` — and an `inAppNotifier`
+adapter that durably writes to a `Notification` table. Everything that wants to notify a user calls one
+function; it has no idea how many channels exist or what they are. This is the same shape of decoupling
+Phase 7 established for events, applied to how those events reach a user.
+
+**Implementation.**
+```ts
+export interface Notifier {
+  readonly name: string;
+  send(message: NotificationMessage): Promise<void>;
+}
+
+export const inAppNotifier: Notifier = {
+  name: 'in-app',
+  async send(message) {
+    await prisma.notification.create({ data: { userId: message.userId, type: message.type, title: message.title, body: message.body, data: message.data } });
+  },
+};
+```
+
+**Pitfalls.** Don't let a caller import a specific adapter directly ("just insert the row here") — always go
+through the port, or the decoupling is fake the moment someone takes a shortcut. Keep the `NotificationMessage`
+shape channel-agnostic (title/body/data) so an adapter doesn't need channel-specific fields threaded through
+every call site.
+
+**Quiz idea.** *Why define a `Notifier` interface instead of calling `prisma.notification.create()` directly
+wherever a notification is needed?* → So every call site depends on one small, stable interface; adding a new
+channel (email, push) means writing one more adapter, not editing every place that currently sends a
+notification.
+
+### Lesson (Task 8.2): Event-Driven Notifications — a Second Subscriber
+
+**The Problem.** With `LessonCompleted` already flowing through the outbox (Phase 7) to award XP, the
+question is how to *also* notify the user — without re-opening `completeLesson`, the relay, or the existing
+XP subscriber to do it.
+
+**Decision & Why.** Add a **second, independent subscriber** to the same `LessonCompleted` event in
+`events.worker.ts` — it doesn't know the XP subscriber exists, and vice versa. Guard it the same shape as
+the XP subscriber (a Redis marker keyed by the outbox event id) but on its *own* key, since it's a distinct
+side effect that needs its own idempotency. A history/bell API (`GET /notifications`, `/unread-count`,
+`POST /:id/read`) exposes what accumulates in the `Notification` table, keyset-paginated newest-first.
+
+**Implementation.**
+```ts
+case 'LessonCompleted': {
+  const payload = job.data.payload;
+  await Promise.all([
+    handleLessonCompleted(job.data.eventId, payload),   // Task 7.4 — unaware this exists
+    notifyLessonCompleted(job.data.eventId, payload),   // Task 8.2 — unaware that one exists
+  ]);
+  break;
+}
+```
+History uses `orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]` with the keyset **cursor** still on `id` — the
+cursor field only needs to be unique, not the sort key; cuids are deliberately non-sequential, so sorting by
+`id` for recency would be wrong, but using it as the cursor to "resume after this row" is fine.
+
+**Pitfalls.** Two subscribers on one event means two idempotency guards, not one shared guard — a redelivery
+that's already a no-op for XP must still be independently evaluated for the notification (and vice versa).
+Don't sort a history/feed by a non-sequential id — sort by a real timestamp, with the id only as a tiebreaker
+and keyset cursor.
+
+**Quiz idea.** *Why can the notification subscriber be added to `LessonCompleted` without changing
+`completeLesson`, the relay, or the XP subscriber?* → Because none of those three know or care how many
+subscribers exist for an event — the outbox/relay/queue only carry the event; each subscriber independently
+decides whether and how to react, which is the actual payoff of the decoupling built in Phase 7.
+
+### Lesson (Task 8.3): Scaling WebSockets with Redis Pub/Sub, Behind a Flag
+
+**The Problem.** A live "instant" notification (no refresh needed) means holding an open connection per
+connected client — a WebSocket. But once there's more than one API replica, a client's socket lives on
+exactly ONE replica, while the event that should notify them can originate on a different replica, or in the
+worker process, which holds no sockets at all. Something has to bridge "this event happened somewhere" to
+"the one replica holding that user's socket."
+
+**Options on the table.**
+- *A WebSocket gateway with no cross-replica bridge* — works with exactly one replica; breaks the moment you scale out, since most replicas won't have the relevant socket.
+- *Sticky sessions (route a user to the same replica every time)* — works, but couples routing to connection state and complicates deploys/autoscaling.
+- *Redis pub/sub fan-out: every replica subscribes to one channel; whichever holds the socket forwards it* — no sticky sessions, no shared registry, scales with replica count. (chosen)
+
+**Decision & Why.** Every replica runs a WebSocket server and subscribes to one Redis channel. Publishing a
+notification means `PUBLISH`ing `{ userId, payload }`; every replica receives it, checks its own **local**
+`Map<userId, Set<socket>>`, and forwards to any it actually holds (most replicas will hold none for a given
+user — that's normal, not an error). Built **behind `REALTIME_ENABLED`**: the WS server and the extra Redis
+connection it needs simply don't start when the flag is off, so the scaffold costs nothing until a feature
+needs it.
+
+**Implementation.**
+```ts
+const subscriber = redis.duplicate(); // SUBSCRIBE puts a connection into subscriber-only mode
+subscriber.subscribe(CHANNEL);
+subscriber.on('message', (_ch, raw) => {
+  const { userId, payload } = JSON.parse(raw);
+  const sockets = socketsByUser.get(userId);           // usually empty on THIS replica — fine
+  sockets?.forEach((ws) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(payload)));
+});
+export const publishRealtime = (userId, payload) => redis.publish(CHANNEL, JSON.stringify({ userId, payload }));
+```
+
+**Pitfalls.** Never reuse your normal Redis client for pub/sub — `SUBSCRIBE` puts a connection into a mode
+where it can't run other commands; always `.duplicate()`. Don't parse env booleans with `z.coerce.boolean()`
+— it coerces ANY non-empty string, including the literal text `"false"`, to `true`; use an enum + transform.
+An in-memory `socketsByUser` map is per-process — a restart drops local connections (clients reconnect), so
+this is a "nice to have live" layer, never the only source of truth (the in-app row still is).
+
+**Quiz idea.** *Why does the WebSocket gateway need Redis pub/sub instead of just keeping a
+`Map<userId, socket>` in the API process?* → With more than one replica, a client's socket lives on only one
+of them, while the triggering event can happen on any replica or in the worker. Pub/sub lets every replica
+learn about the event and forward it only if it happens to hold that user's socket — no sticky sessions or
+shared connection state needed.
+
+### Lesson (Task 8.4): User Notification Preferences
+
+**The Problem.** Not every user wants every channel — someone might want the in-app bell but not (once it
+exists) a push notification for the same event. Preferences need to gate delivery without every notification
+trigger having to know or check them individually, and adding the preference model shouldn't require a
+migration touching every existing user row.
+
+**Options on the table.**
+- *A preferences check inside every event subscriber* — works, but duplicates the check everywhere `notify()` is called instead of once.
+- *A preferences check inside `notify()` itself, gating which registered adapters run* — one place, transparent to every caller. (chosen)
+- *Require a preferences row for every user (created at registration)* — explicit, but needs a backfill for users who existed before the feature; unnecessary write for users who never touch it.
+
+**Decision & Why.** `NotificationPreference` is one row per user, and a **missing row means "all channels
+enabled"** — the default — so introducing the model needed no backfill migration. `notify()` fetches the
+user's preferences once and filters the adapter registry by them before fanning out, so an event subscriber
+(or anything else calling `notify()`) never has to know preferences exist at all.
+
+**Implementation.**
+```ts
+// missing row => defaults; only users who've changed something get a row
+export async function getPreferences(userId) {
+  const row = await prisma.notificationPreference.findUnique({ where: { userId } });
+  return row ?? DEFAULT_PREFERENCES;
+}
+
+// notify() filters the registry by the user's prefs — callers never see this
+const prefs = await getPreferences(message.userId);
+const active = registry.filter((r) => prefs[r.preferenceKey]);
+await Promise.allSettled(active.map((r) => r.notifier.send(message)));
+```
+
+**Pitfalls.** Don't require a row to exist for every user just to represent "the defaults" — that forces a
+backfill for a feature that shipped after users already existed. Filtering happens centrally in `notify()`
+so a new event subscriber automatically respects preferences without writing its own check. Consider whether
+every channel should really be user-disableable — an in-app history a user can fully turn off means they may
+end up with **no record at all** of something that happened to their account; that's a product decision, not
+just a technical one.
+
+**Quiz idea.** *Why does a missing `NotificationPreference` row mean "everything enabled" rather than
+"everything disabled"?* → So shipping the preferences feature requires no backfill migration for users who
+existed before it — every pre-existing user is correctly treated as having made no changes yet, which means
+the defaults, not silence.
