@@ -2318,3 +2318,323 @@ avoiding false alarms on ordinary noise. A fast-burn rule (a much higher multipl
 confirmed on both a short and a slightly-longer window) can page immediately on a severe spike, while a
 slow-burn rule (a lower multiple, confirmed over longer windows) catches a milder sustained leak before the
 whole error budget is exhausted — each severity gets a rule shaped for the failure it's meant to catch.
+
+---
+
+## Phase 13 — Testing & Quality
+
+### Lesson (Task 13.1): The Test Pyramid, and Why `env.ts` Being Frozen Is the Whole Design Problem
+
+**The Problem.** Since Task 5.5, this codebase's DB/Redis-backed tests have been gated behind
+`describe.skipIf(!process.env.RUN_DB_TESTS)` and left to a developer to satisfy by hand: run a local
+Postgres, `export TEST_USER_ID=...`, `export TEST_QUIZ_ID=...` pointing at rows they seeded themselves. That
+works for one developer on one machine, but it does not scale to CI, doesn't reset state between runs, and
+silently drifts (a fixture id someone once exported becomes stale the moment the seed data changes). The
+real fix — spin up a disposable database per test run — runs into a specific wrinkle already built into this
+codebase: `src/config/env.ts` validates `process.env` **once**, at first import, and freezes the result
+(Task 0.2's fail-fast design). A container's Postgres/Redis port is only known *after* it starts, which is
+*after* `pnpm test` has already begun running — so simply starting containers in a `beforeAll` and setting
+`process.env.DATABASE_URL` there is too late if anything already imported `env.ts` by that point.
+
+**Options on the table.**
+- *Point tests at a hand-run dev database (the status quo since Task 5.5)* — simplest, but not reproducible, not CI-friable, and silently drifts.
+- *Mock Prisma/Redis entirely for these tests* — fast and infra-free, but a mock can't prove the real `FOR UPDATE SKIP LOCKED` query, the real composite-PK unique-violation race, or the real OCC `updateMany` behave as claimed — exactly the properties Phase 5/9's concurrency tests exist to prove.
+- *Testcontainers, wired through Vitest's `globalSetup`/`setupFiles` two-stage boundary* — real Postgres/Redis, disposable per run, and the env-freezing problem is solved by exploiting the exact stage separation Vitest already provides. (chosen)
+
+**Decision & Why.** A Vitest `globalSetup` (`tests/support/global-setup.ts`) runs once, in an isolated
+process, before any test file's module graph is touched at all. Gated on `RUN_DB_TESTS` (the same flag Tasks
+5.5/9.6 already check — nothing about the *test files* changes), it starts a `PostgreSqlContainer` +
+`RedisContainer`, applies the committed migration history (`prisma migrate deploy` — never `db push`, so
+tests exercise the exact SQL CI/prod would run), runs the **same idempotent seed script** used for local dev
+(reused, not duplicated), and writes the resulting connection strings + fixture ids to a small JSON state
+file. A separate `setupFiles` entry (`tests/support/setup-env.ts`) runs before **each** test file, reads
+that state file, and injects the values into `process.env` — *before* that test file's own `await
+import(...)` calls (Task 5.5/9.6's existing dynamic-import pattern) ever resolve. The two-stage split isn't
+incidental: `globalSetup` solves "start it once, expensively"; `setupFiles` solves "make sure `env.ts` sees
+it, in time, per file" — one stage can't do both jobs.
+
+**Implementation.**
+```ts
+// tests/support/global-setup.ts — runs ONCE, before any test file's imports
+export default async function globalSetup() {
+  if (!process.env.RUN_DB_TESTS) return async () => {}; // unit-only run: skip entirely, no Docker touched
+  const postgres = await new PostgreSqlContainer('postgres:16-alpine').start();
+  const redis = await new RedisContainer('redis:7-alpine').start();
+  execSync('pnpm exec prisma migrate deploy', { env: { ...process.env, DATABASE_URL: postgres.getConnectionUri() } });
+  execSync('pnpm exec tsx prisma/seed.ts', { env: { ...process.env, DATABASE_URL: postgres.getConnectionUri() } });
+  writeFileSync(STATE_FILE, JSON.stringify({ databaseUrl: postgres.getConnectionUri(), /* ...fixture ids */ }));
+  return async () => { await postgres.stop(); await redis.stop(); }; // the RETURNED fn is the teardown
+}
+
+// tests/support/setup-env.ts — runs before EACH test file, before ITS imports
+if (process.env.RUN_DB_TESTS && existsSync(STATE_FILE)) {
+  const state = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
+  process.env.DATABASE_URL = state.databaseUrl;   // set NOW, so env.ts freezes the RIGHT value
+  process.env.TEST_USER_ID = state.testUserId;
+}
+```
+`pnpm test` stays exactly as fast and infra-free as before; `pnpm test:integration` (`RUN_DB_TESTS=1 vitest
+run`) is the one command that now does everything a developer used to do by hand. A `tests/integration/
+health.test.ts` smoke test (hitting the real `GET /ready` route via `supertest` against the real
+`createApp()` factory — built as a factory back in Task 2.3 specifically so tests could do this) proves the
+whole chain end to end.
+
+**Pitfalls.** A `beforeAll` inside a test file is the wrong layer for this — by the time it runs, the test
+file's top-level imports (and anything they transitively import, including `env.ts`) have already resolved
+against whatever `process.env` looked like at process start. `createApp()` alone does not register the
+readiness checks `/ready` reports on — those come from calling `registerPrismaHooks()`/`registerRedisHooks()`,
+normally done once in `server.ts`; a test hitting `/ready` directly must call them itself. Reusing the
+project's own seed script (rather than writing test-only fixture SQL) means fixture data can never drift
+from what a real developer's database actually looks like.
+
+**Quiz idea.** *Why can't a container's dynamically-assigned Postgres port simply be written into
+`process.env.DATABASE_URL` inside a test file's own `beforeAll` hook?* → `src/config/env.ts` validates and
+freezes `process.env` into an immutable `env` object the FIRST time anything imports it, and a test file's
+top-level imports (which may transitively reach `env.ts`) resolve before any of that file's own `beforeAll`
+hooks run — by the time `beforeAll` executes, it's too late to change what `env` already captured. The value
+has to be in `process.env` before the test file's import graph is touched at all, which is exactly what a
+separate `globalSetup` + per-file `setupFiles` stage (run earlier in Vitest's lifecycle) makes possible.
+
+### Lesson (Task 13.2): Integration Testing Through the Real App — and the Test Suite That DoS'd Itself
+
+**The Problem.** Unit tests (Tasks 5.5/9.6) prove `scoreAnswers`/`occUpdate` are correct in isolation, but
+nothing yet proves the actual HTTP surface behaves as documented end to end: that `/register` really sets an
+httpOnly cookie with the right `Path`, that `/refresh`'s rotation and reuse-detection (Task 3.4) actually
+fire when a real request replays a real, already-rotated cookie, that `requireRole` (Task 3.5) really
+distinguishes 401 from 403. A unit test calling `authService.login()` directly skips the routing, the
+validation middleware, and the cookie-setting logic entirely — exactly the layers most likely to have a bug
+nobody's unit test would ever see.
+
+**Decision & Why.** Use **supertest** against the real `createApp()` factory (built as a factory back in Task
+2.3 specifically so tests could do this) — genuine HTTP requests through genuine Express middleware, hitting
+a real Postgres container (Task 13.1). Rotation/reuse-detection is tested by literally replaying captured
+`Set-Cookie` values across sequential requests (register → refresh → refresh → replay the FIRST cookie → confirm
+the THIRD, still-fresh token is *also* now rejected) — the only way to actually prove
+`revokeAllUserRefreshTokens` fired, versus a unit test that could only prove the function was *called*.
+Because `requireRole(...)` has no real caller anywhere in this codebase yet (a genuine gap this exercise
+surfaced), its 401-vs-403 behavior is proven against a minimal throwaway Express app built inline in the test
+file — the only place that middleware's contract is checked at all.
+
+**The bug this surfaced.** Running the full lifecycle suite in one file — register, duplicate-register,
+malformed-register, two logins, `/me` twice, three refresh-rotation flows, a five-request reuse-detection
+flow, a bare refresh, and a logout — adds up to over 20 real requests against `/api/v1/auth/*` within
+seconds. That is **exactly** the shape Task 3.6's rate limiter (20 requests / 15 min / IP) exists to catch —
+and since the limiter is a module-level singleton shared by every `createApp()` call within one test file
+(not reset per call), the suite's own legitimate traffic started tripping its own defenses partway through.
+The fix: `authRateLimiter` now `skip`s entirely when `NODE_ENV === 'test'` — the same instinct as excluding
+`/health`/`/ready`/`/metrics` from tracing and RED metrics (Phase 12): infrastructure/tooling traffic that
+would otherwise pollute a signal meant for something else. Dev/prod behavior is completely unchanged, since
+`NODE_ENV` is never `'test'` outside a test run.
+
+**Implementation.**
+```ts
+function extractRefreshCookie(res: request.Response): string {
+  const raw = res.headers['set-cookie'];
+  return (Array.isArray(raw) ? raw[0] : raw)!.split(';')[0]!; // "refresh_token=<value>", attrs stripped
+}
+
+const token1 = extractRefreshCookie(await request(app).post('/api/v1/auth/register').send({ email, password }));
+const token2 = extractRefreshCookie(await request(app).post('/api/v1/auth/refresh').set('Cookie', token1));
+const token3 = extractRefreshCookie(await request(app).post('/api/v1/auth/refresh').set('Cookie', token2));
+
+// Replay the ALREADY-ROTATED token1 — reuse detection should fire...
+expect((await request(app).post('/api/v1/auth/refresh').set('Cookie', token1)).status).toBe(401);
+// ...and token3, still valid a moment ago, must ALSO be dead now — proof the
+// revoke was "all of this user's tokens," not just the one that got reused.
+expect((await request(app).post('/api/v1/auth/refresh').set('Cookie', token3)).status).toBe(401);
+```
+```ts
+// src/middleware/rateLimit.ts
+export const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  skip: () => env.NODE_ENV === 'test', // the test suite's own traffic isn't credential stuffing
+  handler: (_req, _res, next) => next(AppError.tooManyRequests(...)),
+});
+```
+
+**Pitfalls.** A middleware-level singleton (the rate limiter's in-memory hit counter) persists across every
+`createApp()` call within one test process/file — spinning up a "fresh" app per test does NOT reset
+shared module state, only the routes/handlers. Asserting reuse detection "worked" by checking only that the
+replayed token was rejected is a weaker test than also checking a THIRD, still-fresh token is rejected
+afterward — the former could pass even if the code only revoked the one reused token instead of the whole
+session tree. Testing `requireRole` against a throwaway app (rather than skipping it, since no real route
+uses it) keeps a real gap from becoming an untested one.
+
+**Quiz idea.** *Why does the refresh-reuse test check that `token3` (issued by the SECOND, legitimate
+refresh) is rejected, instead of stopping once it's confirmed the replayed `token1` itself returns 401?* →
+Checking only `token1`'s rejection would still pass even if the server revoked just that one token. The
+security guarantee that actually matters is "reuse of an old token revokes the ENTIRE session," so the test
+must also prove a different, still-valid token (`token3`) is dead afterward — that's the only way to
+distinguish "revoked one token" from "revoked all of this user's tokens."
+
+### Lesson (Task 13.3): Two Idempotency Layers, Two Different Tests — and a Primitive That Was Never Tested Alone
+
+**The Problem.** By Phase 13, this codebase has TWO separate mechanisms that both claim to make
+`POST /progress/lessons/:id/complete` safe to call more than once: the `Idempotency-Key` middleware (Task
+5.1, a Redis-cached response replay) and the repository's own composite-PK unique constraint (Task 1.3/5.3,
+a database-level guard). `tests/concurrency.test.ts` (Task 5.5) only ever exercised the second one — it calls
+`completeLesson()` directly, skipping the middleware entirely — so the middleware's actual replay behavior
+had **never** been proven end to end. Separately, `withLock` (Task 5.4) has been relied on since Phase 9 (quiz
+attempt start) but was never given a test of its own in isolation — every existing test only observes its
+effects indirectly, through a higher-level feature.
+
+**Decision & Why.** Add real HTTP-level coverage that treats these as what they actually are: two guards for
+two different failure shapes, not one redundant pair. A **sequential** retry (send request 1, `await` its
+full response, then send request 2 with the identical `Idempotency-Key`) proves the middleware's own
+contract — the second response carries `Idempotent-Replay: true` and is byte-for-byte the cached first
+response, not a fresh execution. A **truly concurrent** burst (ten `Promise.all`'d requests, same key) proves
+the opposite point: the middleware's own doc comment concedes it can't help here (all ten can miss the Redis
+cache before any one commits back to it), so it's the repository's unique-constraint catch that guarantees
+exactly one `xpAwarded > 0` — the same guarantee `tests/concurrency.test.ts` already checked, now confirmed
+to hold even when the middleware is technically in the request path and not helping. `withLock` gets its own
+direct test — ten concurrent callers racing for one lock key, asserting exactly one resolves and the other
+nine reject with `409 CONFLICT` — independent of any specific feature that happens to use it.
+
+**Implementation.**
+```ts
+// sequential retry — proves the MIDDLEWARE's replay path
+const first = await request(app).post(url).set('Idempotency-Key', key).send();
+expect(first.headers['idempotent-replay']).toBeUndefined(); // nothing to replay yet
+const replay = await request(app).post(url).set('Idempotency-Key', key).send(); // sent only AFTER first resolved
+expect(replay.headers['idempotent-replay']).toBe('true');
+expect(replay.body).toEqual(first.body); // the ORIGINAL response, verbatim
+
+// true concurrency — same key, all fired at once — proves the DB constraint, not the middleware
+const responses = await Promise.all(Array.from({ length: 10 }, () => request(app).post(url).set('Idempotency-Key', key).send()));
+expect(responses.filter((r) => r.body.alreadyCompleted === false)).toHaveLength(1); // exactly one real award
+
+// withLock in total isolation — no feature code involved at all
+const results = await Promise.allSettled(Array.from({ length: 10 }, () => withLock(key, 2000, async () => 'ran')));
+expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+```
+
+**Pitfalls.** Don't assume "the endpoint is idempotent" is one fact provable by one test — sequential retries
+and true concurrency are different failure modes, guarded by different mechanisms here, and a test suite
+that only exercises one silently leaves the other unverified. A middleware's own doc comment admitting a
+limitation ("true concurrency isn't handled here") is worth turning into an actual test that confirms the
+*other* layer picks up the slack — don't just trust the comment. A primitive used only indirectly (via
+whatever feature happens to call it) can accumulate assumptions nobody's tested directly; `withLock` had been
+relied on since Phase 9 with zero tests of its own until this task.
+
+**Quiz idea.** *Why does proving the `Idempotency-Key` middleware's replay behavior require SENDING THE
+SECOND REQUEST ONLY AFTER THE FIRST HAS FULLY RESOLVED, rather than firing both at once?* → The middleware
+reads from Redis, then later writes the response back to Redis — two truly simultaneous requests can both
+read a cache miss before either one's write commits, so a `Promise.all`'d pair would prove nothing about the
+middleware's replay path (it would instead just exercise the same DB-level unique-constraint guard again).
+Only a genuinely sequential retry — second request dispatched after the first's response is already cached —
+actually exercises the cache-hit/replay branch.
+
+### Lesson (Task 13.4): Load Testing — Proving the SLO Holds Under Concurrency, Not Just Correctness
+
+**The Problem.** Every concurrency test so far (Tasks 5.5, 9.6, 13.3) proves *correctness under a fixed,
+small burst* — ten `Promise.all`'d requests, asserting exactly one "won." That's the right tool for proving a
+race is safe, but it says nothing about *latency and error rate under sustained, realistic load* — the exact
+thing Phase 12's Availability and Latency SLOs (`docs/observability/slos.md`) make a concrete promise about.
+A promise nobody has ever tried to break isn't a validated promise.
+
+**Decision & Why.** Use **k6** — a load-testing tool built for exactly this shape of test (ramping virtual
+users, built-in latency percentiles, pass/fail thresholds) — against the quiz start→submit flow (Phase 9's
+server-authoritative timing + OCC) and lesson completion (Phase 5's transaction + idempotency), the two
+write paths this project has invested the most concurrency-safety effort in. The load test's own
+`thresholds` are set to the **exact same numbers** as the SLOs themselves (`p(95)<300` ms,
+`http_req_failed rate<0.005`) — a load test that passes a looser bar of its own invention would validate
+nothing about whether the actual, promised SLO holds. k6 is a genuinely different kind of test from
+everything else in `tests/`: it's a separate runtime (not Node/vitest) making real network requests against
+an **already-running** process — Task 13.1's Testcontainers harness, built specifically to provision
+ephemeral infra *inside* a vitest run, has no role here at all. `prisma/seed.ts` gained one new fixture (a
+published, 300-second `Quiz` on the 'next-steps' lesson) specifically so this script has something realistic
+to point at without any one-off manual setup beyond the `pnpm db:seed` a developer already runs.
+
+**Implementation.**
+```js
+export const options = {
+  scenarios: { quiz_flow: { executor: 'ramping-vus', stages: [
+    { duration: '30s', target: 20 }, { duration: '1m', target: 20 }, { duration: '30s', target: 0 },
+  ] } },
+  thresholds: {
+    // The SAME numbers as docs/observability/slos.md's SLOs — not a
+    // convenient, looser bar invented just for this script.
+    http_req_duration: ['p(95)<300'],
+    http_req_failed: ['rate<0.005'],
+  },
+};
+
+export default function () {
+  const { accessToken } = registerFreshUser();                       // one new learner per iteration
+  http.post(`${BASE_URL}/api/v1/progress/lessons/${TEST_LESSON_ID}/complete`, null, authHeaders);
+
+  const { attemptId, questions } = startQuiz(TEST_QUIZ_ID, authHeaders); // Phase 9's deadline/lock path
+  const answers = questions.map((q) => ({ questionId: q.id, selectedIndex: 0 }));
+  http.post(`${BASE_URL}/api/v1/quizzes/attempts/${attemptId}/submit`, JSON.stringify({ answers }), authHeaders);
+}
+```
+
+**Pitfalls.** A load test whose thresholds are looser than the actual SLOs proves nothing about whether the
+SLOs are realistic — the numbers have to match, or the exercise is theater. Registering a fresh user per
+iteration (rather than reusing one shared account across all virtual users) matters here for a reason beyond
+realism: reusing one account would route every quiz submit through the SAME `IN_PROGRESS` attempt row,
+turning a load test into an accidental repeat of Task 9.6's small-N concurrency test instead of measuring
+what many independent learners' traffic actually looks like. This kind of test needs REAL running
+infrastructure (`docker compose up -d`, `pnpm db:seed`, `pnpm dev`) — it cannot be wired into the
+Testcontainers `globalSetup` from Task 13.1, because k6 isn't part of that Node process at all.
+
+**Quiz idea.** *Why are this load test's pass/fail thresholds set to the exact same numbers as the SLOs in
+`docs/observability/slos.md`, instead of a separately-chosen, more lenient bar?* → The point of the load test
+is to validate whether the SLO — the actual promise made to the SLO doc's readers — holds under realistic
+concurrent traffic. A load test with its own looser thresholds could pass while the real SLO was already
+being violated, which would make the exercise decorative rather than a genuine check on the promise.
+
+### Lesson (Task 13.5): A Coverage Gate in CI — and Testcontainers Erasing the `services:` Block Entirely
+
+**The Problem.** Everything built in Phase 13 so far only proves something when a person remembers to run
+it — `pnpm test:integration`, `pnpm test:load` — on their own machine, whenever they feel like it. Nothing
+stops a change from merging with a broken test, or with test coverage quietly eroding over time as new code
+lands without matching tests. A test suite that isn't run automatically, on every change, is a test suite
+that's optional.
+
+**Decision & Why.** A GitHub Actions workflow that installs, generates the Prisma client, lints, typechecks
+**both** `src/` and `tests/` (Task 13.1's `tsconfig.test.json` — the gap flagged back then, closed now: CI is
+the first thing that will ever actually typecheck the `tests/` directory), then runs the **full** suite —
+unit tests AND the Testcontainers-backed integration tests together — with coverage instrumented and
+`vitest.config.ts`'s `coverage.thresholds` as the enforcement mechanism: `vitest run --coverage` itself exits
+non-zero if a threshold isn't met, so the CI step failing IS the gate, with no separate coverage-parsing
+script needed. The genuinely interesting design point: this workflow has **no `services:` block** for
+Postgres/Redis, unlike almost every tutorial's version of "CI with a database." `ubuntu-latest` ships a
+running Docker daemon; Testcontainers (Task 13.1's `global-setup.ts`) talks to that daemon directly and
+starts its own disposable containers, meaning the exact same command (`pnpm test:integration`) that works on
+a developer's laptop is what CI runs too — no infrastructure defined twice, once as YAML and once as
+application code, that could quietly drift apart.
+
+**Implementation.**
+```yaml
+# .github/workflows/ci.yml — no `services:` block at all
+- run: pnpm exec prisma generate   # generated client types are needed before ANY typecheck/test step
+- run: pnpm typecheck
+- run: pnpm typecheck:test         # the tests/ directory, only ever typechecked here for the first time
+- run: pnpm test:coverage:integration   # == RUN_DB_TESTS=1 vitest run --coverage
+```
+```ts
+// vitest.config.ts — the actual gate
+coverage: {
+  thresholds: { lines: 50, statements: 50, functions: 50, branches: 40 },
+  // deliberately modest: no real coverage number has ever been measured in
+  // this sandbox — see ADR-0014's environment note. A gate that exists and
+  // is non-trivial, to be tightened once a real run reports real numbers.
+},
+```
+
+**Pitfalls.** A `services:` block would hardcode a Postgres/Redis image and port choice into the workflow
+YAML — a second place that infrastructure is defined, separate from (and able to silently drift from)
+whatever `global-setup.ts` actually starts. Coverage thresholds picked without ever having run the suite once
+are a placeholder, not a real target — treat them as "a gate exists" rather than "this number is
+meaningful," and revisit the moment CI actually reports a number. `tests/` being outside the main
+`tsconfig.json`'s `include` (Task 13.1's flagged gap) means a broken test file could sit unnoticed for a long
+time if nothing ever typechecks it — `typecheck:test` closes that gap, but only because CI actually runs it.
+
+**Quiz idea.** *Why does this CI workflow have no `services:` block for Postgres or Redis, when most
+"CI with a database" tutorials add one?* → The Testcontainers-based harness from Task 13.1 already knows how
+to start disposable Postgres/Redis containers directly against whatever Docker daemon is available —
+`ubuntu-latest` ships one already running. Adding a `services:` block would duplicate that infrastructure
+definition in YAML, creating two places (the workflow file and `global-setup.ts`) that could drift out of
+sync, instead of one command (`pnpm test:integration`) that behaves identically on a laptop and in CI.

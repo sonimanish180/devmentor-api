@@ -22,10 +22,16 @@ describe('occUpdate', () => {
 
 /**
  * Integration: fire N parallel completions of the same lesson and assert XP is
- * awarded EXACTLY ONCE (the composite-PK + transaction guarantee). Requires a
- * live Postgres + Redis and a seeded lesson.
+ * awarded EXACTLY ONCE (the composite-PK + transaction guarantee).
  *
- *   RUN_DB_TESTS=1 pnpm test
+ *   pnpm test:integration        # == RUN_DB_TESTS=1 vitest run
+ *
+ * As of Task 13.1, that single command is now self-contained: a global setup
+ * (tests/support/global-setup.ts) starts disposable Postgres + Redis
+ * containers, applies the real migration history, runs the shared seed
+ * script, and writes TEST_USER_ID/TEST_LESSON_ID into process.env before this
+ * file's import above ever resolves — no manually-run dev database, no
+ * hand-exported ids required anymore.
  */
 describe.skipIf(!process.env.RUN_DB_TESTS)('completeLesson under concurrency', () => {
   it('awards XP exactly once for parallel duplicate requests', async () => {

@@ -95,7 +95,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | 10 | Messaging at scale (Kafka) | ✅ | [0011](./docs/adr/0011-kafka-graduation-criteria.md) | [Phase 10 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
 | 11 | Search & content delivery | ✅ | [0012](./docs/adr/0012-postgres-fts-vs-search-engine.md) | [Phase 11 module](../devmentor/src/data/backend-build-curriculum.ts) (3 lessons) | — |
 | 12 | Observability & operations | ✅ | [0013](./docs/adr/0013-observability-stack.md) | [Phase 12 module](../devmentor/src/data/backend-build-curriculum.ts) (3 lessons) | — |
-| 13 | Testing & quality | ⬜ | — | — | — |
+| 13 | Testing & quality | ✅ | [0014](./docs/adr/0014-testing-strategy.md) | [Phase 13 module](../devmentor/src/data/backend-build-curriculum.ts) (5 lessons) | — |
 | 14 | Containerization (Docker) | ⬜ | — | — | — |
 | 15 | CI/CD, deployment & scaling | ⬜ | — | — | — |
 
@@ -122,6 +122,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | [0011](./docs/adr/0011-kafka-graduation-criteria.md) | Kafka alongside BullMQ (graduation criteria met) | 10 | Accepted |
 | [0012](./docs/adr/0012-postgres-fts-vs-search-engine.md) | Postgres full-text search (not a dedicated engine, yet) | 11 | Accepted |
 | [0013](./docs/adr/0013-observability-stack.md) | Observability stack: OpenTelemetry tracing, Prometheus/Grafana metrics, SLO alerting | 12 | Accepted |
+| [0014](./docs/adr/0014-testing-strategy.md) | Testing strategy: Testcontainers over mocks, k6 for load, coverage as a CI gate | 13 | Accepted |
 
 ---
 

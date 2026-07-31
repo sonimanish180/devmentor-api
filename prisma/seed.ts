@@ -87,6 +87,28 @@ async function main() {
     },
   });
 
+  // A timed Quiz (Task 9.1's relational model — distinct from the legacy
+  // `Lesson.quiz` JSONB field above) attached to the second lesson. Published,
+  // and long enough (5 minutes) that a k6 load test (Task 13.4) can safely
+  // start → submit attempts without the server-authoritative deadline
+  // expiring mid-run. Testcontainers integration tests (Task 13.1) seed their
+  // OWN short-duration quiz on top of this one, on a different lesson, so the
+  // two never collide.
+  await prisma.quiz.upsert({
+    where: { lessonId: next.id },
+    update: {},
+    create: {
+      lessonId: next.id,
+      durationSeconds: 300,
+      contestMode: false,
+      published: true,
+      questions: [
+        { id: 'q1', prompt: '2 + 2 = ?', options: ['3', '4'], correctIndex: 1, points: 1 },
+        { id: 'q2', prompt: 'HTTP status code for "not found"?', options: ['200', '404'], correctIndex: 1, points: 1 },
+      ],
+    },
+  });
+
   // Enroll the demo user and seed some progress (idempotent via composite PKs).
   await prisma.enrollment.upsert({
     where: { userId_courseId: { userId: user.id, courseId: course.id } },

@@ -1,0 +1,64 @@
+name: CI
+
+# CI coverage gate (Task 13.5). Lints, typechecks (both the app and the test
+# tree — Task 13.1's tsconfig.test.json), and runs the FULL test suite —
+# unit tests plus the Testcontainers-backed integration suite (Task 13.1) —
+# with coverage enforced via vitest.config.ts's `coverage.thresholds`.
+#
+# No `services:` block for Postgres/Redis: ubuntu-latest ships a running
+# Docker daemon, and Testcontainers (tests/support/global-setup.ts) starts
+# its own disposable containers directly against that daemon when
+# RUN_DB_TESTS=1. A `services:` block would hardcode image/port choices into
+# THIS workflow file; Testcontainers keeps that definition in application
+# code instead, so the exact same setup runs identically on a developer's
+# laptop (`pnpm test:integration`) and here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: devmentor-api
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: devmentor-api/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # Generates the typed Prisma client. Needed before ANY typecheck or
+      # test step — src/lib/prisma.ts and every module referencing a model
+      # type (Level, QuizAttemptStatus, ...) import from the GENERATED
+      # client, not just a live database connection.
+      - run: pnpm exec prisma generate
+
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm typecheck:test
+
+      # Unit + Testcontainers integration tests, coverage-instrumented, gated
+      # by vitest.config.ts's thresholds (a failing threshold fails this step,
+      # which is the entire enforcement mechanism — nothing else parses the
+      # coverage report).
+      - name: Test suite with coverage (unit + integration)
+        run: pnpm test:coverage:integration
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: devmentor-api/coverage

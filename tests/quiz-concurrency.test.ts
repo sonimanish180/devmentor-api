@@ -50,10 +50,12 @@ describe('toPublicQuestion', () => {
  * Integration: exercise the actual concurrency/timing guarantees against a
  * live Postgres + Redis.
  *
- *   RUN_DB_TESTS=1 TEST_USER_ID=... TEST_QUIZ_ID=... pnpm test
+ *   pnpm test:integration        # == RUN_DB_TESTS=1 vitest run
  *
- * Requires a seeded, published, contestMode=false quiz with a short
- * `durationSeconds` (a few seconds) so the deadline test doesn't need a real sleep.
+ * As of Task 13.1, `global-setup.ts` provisions a short-duration
+ * (`durationSeconds: 2`), published, contestMode=false quiz against the
+ * disposable Postgres container itself and writes its id to TEST_QUIZ_ID —
+ * this file no longer expects a developer to have hand-seeded one.
  */
 describe.skipIf(!process.env.RUN_DB_TESTS)('quiz attempts under concurrency', () => {
   it('firing N parallel start requests for the same user+quiz yields exactly one attempt row', async () => {
