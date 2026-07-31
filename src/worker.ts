@@ -1,3 +1,8 @@
+import 'dotenv/config';
+// MUST be the first non-dotenv import — see src/observability/tracing.ts.
+// (worker.ts didn't import dotenv/config before Task 12.1 either; added here
+// too so OTEL_* and every other env var are actually available to it.)
+import { shutdownTracing } from './observability/tracing';
 import { logger } from './lib/logger';
 import { redis } from './lib/redis';
 import { startEmailWorker } from './queues/email.worker';
@@ -52,6 +57,7 @@ async function main(): Promise<void> {
     await Promise.all(workers.map((w) => w.close())); // waits for in-flight jobs to finish
     await Promise.all(kafkaConsumers.map((c) => c.stop()));
     await redis.quit();
+    await shutdownTracing();
     process.exit(0);
   }
 

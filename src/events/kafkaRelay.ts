@@ -10,6 +10,7 @@ interface OutboxRow {
   id: string;
   type: string;
   payload: unknown;
+  traceCarrier: Record<string, string> | null;
 }
 
 /**
@@ -36,7 +37,7 @@ function partitionKeyFor(payload: unknown): string {
 async function relayBatch(): Promise<number> {
   return prisma.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<OutboxRow[]>`
-      SELECT id, type, payload
+      SELECT id, type, payload, "traceCarrier"
       FROM "OutboxEvent"
       WHERE "kafkaDispatchedAt" IS NULL
       ORDER BY "createdAt" ASC
@@ -53,7 +54,13 @@ async function relayBatch(): Promise<number> {
       topic: DOMAIN_EVENTS_TOPIC,
       messages: rows.map((row) => ({
         key: partitionKeyFor(row.payload),
-        value: JSON.stringify({ eventId: row.id, type: row.type, version: 1, payload: row.payload }),
+        value: JSON.stringify({
+          eventId: row.id,
+          type: row.type,
+          version: 1,
+          payload: row.payload,
+          traceCarrier: row.traceCarrier, // forwarded untouched — see src/observability/context.ts
+        }),
       })),
     });
 

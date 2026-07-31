@@ -6,6 +6,7 @@ import { prisma } from '../lib/prisma';
 import { withEventGuard } from '../lib/eventGuard';
 import { notify } from '../notifications';
 import { recordScore } from '../quiz/leaderboard';
+import { runWithLinkedTrace } from '../observability/context';
 import type { DomainEventJob } from './events.queue';
 import type { LessonCompletedPayload, QuizSubmittedPayload } from '../events/contracts';
 
@@ -104,8 +105,17 @@ export function startEventsWorker(): Worker<DomainEventJob> {
           const payload = job.data.payload as LessonCompletedPayload;
           // Two independent subscribers react to the one event; neither knows
           // the other exists, and adding a third is one more branch here.
+          //
+          // Only the XP subscriber is wrapped in `runWithLinkedTrace` here —
+          // a deliberately scoped first example of the pattern (Task 12.1),
+          // not yet applied to every subscriber in this file. Extending it to
+          // `notifyLessonCompleted`/`notifyQuizSubmitted` is the same one-line
+          // wrap, left as a natural follow-up rather than done reflexively
+          // everywhere in one pass.
           await Promise.all([
-            handleLessonCompleted(job.data.eventId, payload),
+            runWithLinkedTrace('events-worker', 'handleLessonCompleted', job.data.traceCarrier, () =>
+              handleLessonCompleted(job.data.eventId, payload),
+            ),
             notifyLessonCompleted(job.data.eventId, payload),
           ]);
           break;

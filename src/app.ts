@@ -4,8 +4,10 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { env } from './config/env';
 import { httpLogger } from './middleware/httpLogger';
+import { metricsMiddleware } from './middleware/metrics';
 import { authRateLimiter } from './middleware/rateLimit';
 import { healthRouter } from './modules/health/health.routes';
+import { metricsRouter } from './observability/metrics.routes';
 import { apiRouter } from './api/router';
 import { notFoundHandler } from './middleware/notFound';
 import { errorHandler } from './middleware/errorHandler';
@@ -17,9 +19,9 @@ import { errorHandler } from './middleware/errorHandler';
  *
  * Middleware order matters:
  *   1. security headers (helmet) + CORS
- *   2. request logging + correlation id
+ *   2. request logging + correlation id, then RED metrics recording (Task 12.2)
  *   3. body + cookie parsing
- *   4. health probes (unauthenticated, un-rate-limited)
+ *   4. health probes + /metrics (unauthenticated, un-rate-limited)
  *   5. rate limiting on sensitive routes, then the versioned API
  *   6. 404 handler, then the centralized error handler (must be last)
  */
@@ -33,11 +35,14 @@ export function createApp(): Express {
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
 
   app.use(httpLogger);
+  app.use(metricsMiddleware);
   app.use(express.json());
   app.use(cookieParser());
 
-  // Health/readiness probes — unauthenticated and outside rate limiting.
+  // Health/readiness probes and the Prometheus scrape endpoint — all three
+  // are infra endpoints: unauthenticated and outside rate limiting.
   app.use(healthRouter);
+  app.use(metricsRouter);
 
   // Version index for discovery.
   app.get('/api', (_req, res) => res.json({ versions: ['v1'], current: '/api/v1' }));

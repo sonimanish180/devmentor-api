@@ -1,0 +1,23 @@
+# Prometheus scrape config for local dev (Task 12.2).
+#
+# The API runs on the HOST (`pnpm dev`), not in this Compose network, so
+# Prometheus — which runs inside a container — reaches it via
+# `host.docker.internal`, Docker's DNS name for "the machine running the
+# containers." On Linux that name only resolves because docker-compose.yml
+# adds `extra_hosts: ["host.docker.internal:host-gateway"]` to the
+# `prometheus` service; Docker Desktop (Mac/Windows) provides it out of the box.
+global:
+  scrape_interval: 15s
+
+# SLO burn-rate + freshness alert rules (Task 12.3) — see
+# docs/observability/slos.md and prometheus-alerts.yml. Prometheus only
+# EVALUATES these and exposes firing state at http://localhost:9090/alerts;
+# no Alertmanager is wired up in this dev stack to route/page on them yet.
+rule_files:
+  - /etc/prometheus/prometheus-alerts.yml
+
+scrape_configs:
+  - job_name: devmentor-api
+    static_configs:
+      - targets: ["host.docker.internal:4000"] # matches PORT in .env.example
+    metrics_path: /metrics

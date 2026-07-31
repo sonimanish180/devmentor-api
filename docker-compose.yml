@@ -3,9 +3,13 @@
 # stateful backing services live in Docker here. (A full containerized stack —
 # api + worker + pgbouncer — arrives in Phase 14.)
 #
-#   docker compose up -d        # start postgres + redis + kafka
-#   docker compose ps           # all three should be "healthy"
+#   docker compose up -d        # start postgres + redis + kafka + jaeger + prometheus + grafana
+#   docker compose ps           # all should be "healthy"
 #   docker compose down         # stop (add -v to wipe data volumes)
+#
+#   Jaeger UI:      http://localhost:16686
+#   Prometheus UI:  http://localhost:9090  (alert firing state: /alerts)
+#   Grafana UI:     http://localhost:3001  (anonymous viewer access, dev only)
 
 services:
   postgres:
@@ -72,7 +76,60 @@ services:
       timeout: 5s
       retries: 15
 
+  # Jaeger, all-in-one — a trace STORAGE + QUERY UI, receiving spans over
+  # OTLP (native since Jaeger 1.35+, no separate collector needed for local
+  # dev). In-memory storage: traces vanish on restart, which is fine for a
+  # dev box, not for production (that would want Elasticsearch/Cassandra/
+  # object-storage-backed storage behind the same Jaeger query API).
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: devmentor-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4318:4318"   # OTLP HTTP receiver — matches OTEL_EXPORTER_OTLP_ENDPOINT
+
+  # Prometheus (Task 12.2) — scrapes the API's `/metrics` on the HOST (the API
+  # runs via `pnpm dev`, not in this Compose network) via `host.docker.internal`.
+  # `extra_hosts` makes that name resolve on Linux too, not just Docker Desktop.
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: devmentor-prometheus
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-alerts.yml:/etc/prometheus/prometheus-alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090" # Prometheus UI — http://localhost:9090; alert firing state at /alerts
+
+  # Grafana (Task 12.3) — datasource and the devmentor-api dashboard are both
+  # auto-provisioned from files in ./grafana, so a fresh `docker compose up -d`
+  # gives a working dashboard with no manual setup (same philosophy as the
+  # Prisma seed script, Task 1.4: reproducible state from a checked-in file).
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: devmentor-grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true" # dev only — no login wall to view the dashboard
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3001:3000" # Grafana UI — http://localhost:3001 (3000 is often already taken by a frontend dev server)
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
   redisdata:
   kafkadata:
+  promdata:
+  grafanadata:

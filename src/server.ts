@@ -1,4 +1,8 @@
 import 'dotenv/config';
+// MUST come before any import that transitively requires express/ioredis/
+// prisma (createApp does) — auto-instrumentation patches those modules at
+// `require` time, so tracing has to start first. See src/observability/tracing.ts.
+import { shutdownTracing } from './observability/tracing';
 import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './lib/logger';
@@ -6,7 +10,10 @@ import { registerPrismaHooks } from './lib/prisma';
 import { registerRedisHooks } from './lib/redis';
 import { onShutdown, runShutdownHooks } from './lib/shutdown';
 import { emailQueue } from './queues/email.queue';
+import { eventsQueue } from './queues/events.queue';
 import { startRealtimeGateway } from './realtime/gateway';
+import { startQueueDepthPoller, startOutboxLagPoller } from './observability/metrics';
+import { prisma } from './lib/prisma';
 
 /**
  * HTTP server bootstrap + graceful shutdown.
@@ -25,6 +32,26 @@ const FORCE_EXIT_MS = 10_000;
 registerPrismaHooks(); // DB readiness check + graceful disconnect
 registerRedisHooks(); // Redis readiness check + graceful quit
 onShutdown('emailQueue', () => emailQueue.close()); // close the producer queue on shutdown
+onShutdown('tracing', shutdownTracing); // flush buffered spans before exit
+
+// Queue depth (Task 12.2) — sampled here in the API process rather than the
+// worker: both processes hold a `Queue` client for the same underlying
+// Redis-backed queue, and this poller only ever READS job counts, never
+// `.add()`s. Keeping it on the API means `/metrics` (also served here) can
+// report worker-layer saturation without the worker needing its own HTTP
+// server just to expose one gauge.
+const queueDepthPoller = startQueueDepthPoller({ email: emailQueue, events: eventsQueue });
+onShutdown('queueDepthPoller', () => {
+  queueDepthPoller.stop();
+});
+
+// Outbox lag (Task 12.3) — freshness signal for the two independent relay
+// cursors introduced in Phase 10 (`dispatchedAt` for BullMQ, `kafkaDispatchedAt`
+// for Kafka). Reuses the app's existing Prisma singleton (Task 1.1).
+const outboxLagPoller = startOutboxLagPoller(prisma);
+onShutdown('outboxLagPoller', () => {
+  outboxLagPoller.stop();
+});
 
 const app = createApp();
 const server = app.listen(env.PORT, () => {

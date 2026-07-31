@@ -9,6 +9,7 @@ interface OutboxRow {
   id: string;
   type: string;
   payload: unknown;
+  traceCarrier: Record<string, string> | null;
 }
 
 /**
@@ -32,7 +33,7 @@ interface OutboxRow {
 async function relayBatch(): Promise<number> {
   return prisma.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<OutboxRow[]>`
-      SELECT id, type, payload
+      SELECT id, type, payload, "traceCarrier"
       FROM "OutboxEvent"
       WHERE "dispatchedAt" IS NULL
       ORDER BY "createdAt" ASC
@@ -44,7 +45,7 @@ async function relayBatch(): Promise<number> {
     for (const row of rows) {
       await eventsQueue.add(
         row.type,
-        { eventId: row.id, type: row.type, payload: row.payload },
+        { eventId: row.id, type: row.type, payload: row.payload, traceCarrier: row.traceCarrier },
         { jobId: `event:${row.id}` },
       );
     }

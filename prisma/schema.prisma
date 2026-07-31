@@ -3,7 +3,10 @@
 // Lesson, Enrollment, progress). This task (1.1) establishes the connection.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // Emits OpenTelemetry spans for query engine work when `@prisma/instrumentation`
+  // is registered with the SDK (Task 12.1) — otherwise a no-op.
+  previewFeatures = ["tracing"]
 }
 
 datasource db {
@@ -212,6 +215,13 @@ model OutboxEvent {
   // adding a third sink later is "add a column + a relay," not a rewrite.
   dispatchedAt      DateTime?
   kafkaDispatchedAt DateTime?
+  // A captured OpenTelemetry trace carrier (W3C `traceparent`, as a plain
+  // object) — set by `writeOutboxEvent` at write time (Task 12.1), so a
+  // relay can hand it to whatever processes the event and that processing
+  // shows up linked to the ORIGINAL request's trace, not as an orphan span.
+  // Deliberately its own column, not folded into `payload`: it's telemetry
+  // metadata about the event, not part of the event's business data.
+  traceCarrier      Json?
 
   @@index([dispatchedAt, createdAt])
   @@index([kafkaDispatchedAt, createdAt])

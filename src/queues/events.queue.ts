@@ -7,6 +7,8 @@ export interface DomainEventJob {
   eventId: string;
   type: string;
   payload: unknown;
+  /** Captured trace context (Task 12.1) — lets a subscriber link its processing to the originating request's trace. */
+  traceCarrier?: Record<string, string> | null;
 }
 
 /**

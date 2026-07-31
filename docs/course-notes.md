@@ -2105,3 +2105,216 @@ process, or you'll watch a popularity signal mysteriously reset every time conte
 → `completionCount` is owned by the event-driven path (incremented by the search-index-consumer on
 `LessonCompleted`); if the bulk rebuild's update also touched it, every reindex would silently reset
 accumulated popularity data back to whatever the create-time default was.
+
+---
+
+## Phase 12 — Observability & Operations
+
+### Lesson (Task 12.1): Distributed Tracing — and Carrying a Trace Across an Async Boundary
+
+**The Problem.** A single learner action can now fan out across a request handler, a Postgres write, an
+outbox row, a relay, a BullMQ job, and a subscriber — possibly a second one over Kafka too. When something
+is slow or fails, logs from each hop are individually structured (Task 0.3) but not *connected*: nothing
+today shows that "this HTTP request" and "this later worker job" are the same causal chain. A
+correlation id is enough within one request; it does not survive the request finishing before the async
+work runs.
+
+**Options on the table.**
+- *Correlation ids only, threaded further* — cheap, but manual, ad-hoc, and gives no timing/waterfall view across hops.
+- *A custom tracing scheme (pass a request id through queues, log durations by hand)* — reinvents a wheel that's already standardized and tool-supported.
+- *OpenTelemetry (vendor-neutral tracing SDK) + a trace backend (Jaeger)* — standard instrumentation, auto-patches common libraries, exports to any OTLP-compatible backend. (chosen)
+
+**Decision & Why.** Adopt **OpenTelemetry**: `NodeSDK` with `getNodeAutoInstrumentations` (patches
+`http`, `express`, `ioredis`, etc. at `require` time) plus `@prisma/instrumentation` (needs
+`previewFeatures = ["tracing"]` in the Prisma schema) for DB-level spans, exporting over OTLP/HTTP to a
+local **Jaeger** all-in-one container. The health-probe routes (`/health`, `/ready`, `/metrics`) are
+excluded from HTTP instrumentation via `ignoreIncomingRequestHook` — they run every few seconds and would
+otherwise flood the trace backend with meaningless spans.
+
+The harder problem is the **outbox is an async boundary**: the HTTP request that writes an `OutboxEvent`
+row finishes and its trace ends before the relay ever reads that row. OTel's automatic context propagation
+(the part that makes one HTTP request's spans nest correctly) has no way to reach across "a row sat in a
+table for an arbitrary amount of time." So the trace context is captured **explicitly** at write time —
+`propagation.inject` serializes the active span's context into a plain `traceCarrier` JSON object, stored as
+its own column on `OutboxEvent` — and both relays (BullMQ, Kafka) forward that object **untouched** through
+the job data / message envelope. A subscriber then calls `propagation.extract` to rebuild the context and
+starts a new span as its child, so Jaeger shows one continuous trace from the original HTTP request through
+to the worker handling it, even though real time and a process boundary sit in between.
+
+**Implementation.**
+```ts
+// src/observability/tracing.ts — MUST be the literal first import in every
+// entrypoint (server.ts, worker.ts): auto-instrumentation patches modules at
+// `require` time, so tracing has to start before anything else is required.
+const sdk = new NodeSDK({
+  resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName }),
+  traceExporter: new OTLPTraceExporter({ url: otlpEndpoint }),
+  instrumentations: [getNodeAutoInstrumentations({ /* ignore /health, /ready, /metrics */ }), new PrismaInstrumentation()],
+});
+sdk.start();
+
+// src/observability/context.ts — capture at write time, relink at consume time
+export function captureTraceCarrier(): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  propagation.inject(context.active(), carrier); // serializes the ACTIVE span's context
+  return carrier;
+}
+export async function runWithLinkedTrace<T>(tracerName: string, spanName: string, carrier, fn: () => Promise<T>): Promise<T> {
+  const parentCtx = propagation.extract(context.active(), carrier ?? {});
+  return context.with(parentCtx, () =>
+    trace.getTracer(tracerName).startActiveSpan(spanName, async (span) => {
+      try { return await fn(); } finally { span.end(); }
+    }),
+  );
+}
+
+// outbox.ts — the carrier rides in its own column, alongside the event payload
+await tx.outboxEvent.create({ data: { ..., traceCarrier: captureTraceCarrier() } });
+
+// events.worker.ts — only ONE subscriber wrapped so far, as a scoped first example
+await runWithLinkedTrace('events-worker', 'handleLessonCompleted', job.data.traceCarrier, () =>
+  handleLessonCompleted(job.data.eventId, payload),
+);
+```
+Logs are correlated to traces (not just requests) via a pino `mixin()` that reads the *active* span's
+`traceId`/`spanId` off `trace.getActiveSpan()` and attaches them to every log line written while that span
+is open — so a trace found in Jaeger and a log line found in an aggregator can point at each other.
+
+**Pitfalls.** Auto-instrumentation patches libraries by intercepting `require`/`import` at load time —
+importing `tracing.ts` **after** `express`/`ioredis` are already required (even transitively, via another
+import earlier in the file) means those modules are never patched and silently produce no spans. Automatic
+context propagation only works within a *synchronous* causal chain (HTTP → same-process async/await); it
+does **not** cross a queue, a database row, or any boundary where "the next step" runs in a different
+process at an unrelated time — that always needs an explicit capture/carry/extract, same shape as this
+outbox carrier. Forgetting `previewFeatures = ["tracing"]` means Prisma spans silently don't appear (no
+error, just missing data). Don't trace `/health`/`/ready`/`/metrics` — high-frequency, low-value spans drown
+out the ones that matter.
+
+**Quiz idea.** *Why can't OpenTelemetry's automatic context propagation carry a trace from the HTTP request
+that writes an outbox row to the worker that later processes it, and what closes that gap here?* → Automatic
+propagation only follows a live, synchronous/async-await causal chain within (or directly across) a request;
+once the row is written the HTTP request ends and the relay picks it up an arbitrary, unrelated time later
+in a different process — so the trace context is captured explicitly (`propagation.inject` into a stored
+`traceCarrier` column) at write time and re-extracted (`propagation.extract`) by the subscriber to continue
+the same trace as a child span.
+
+### Lesson (Task 12.2): Metrics — RED for Requests, USE for the Queue, and Why a Histogram Beats an Average
+
+**The Problem.** Traces (Task 12.1) show what happened to one request, in detail — but nobody wants an
+alert that fires per-trace, and no dashboard should be "read every trace and eyeball a trend." Answering
+"is the system healthy *right now*, in aggregate?" and "is it drifting toward trouble?" needs numbers that
+are cheap to compute, cheap to store over time, and cheap to alert on — that's what metrics are for, and
+why they're a separate pillar from traces even though both start at the same request.
+
+**Options on the table.**
+- *Compute aggregates from logs after the fact (log-based metrics)* — no new infra, but expensive to query at read time and slow to alert on.
+- *Push metrics to a time-series backend (StatsD-style)* — real-time, but adds an always-on network dependency to every request.
+- *A `/metrics` endpoint a scraper polls (Prometheus's pull model), via `prom-client`* — the app stays simple (increment in-memory counters), the scraper owns polling cadence and storage. (chosen)
+
+**Decision & Why.** Use **`prom-client`**'s pull model: the app maintains in-memory Counters/Histograms/
+Gauges, exposes them as text at **`GET /metrics`**, and a **Prometheus** container scrapes that endpoint on
+an interval. For the HTTP layer, follow **RED** (Rate, Errors, Duration): a `Counter` sliced by
+`method`/`route`/`status` gives both Rate (sum) and Errors (filter `status>=500`) for free from one series,
+and a `Histogram` for duration — **not an average** — because an average of "one request took 3 seconds,
+ninety-nine took 3ms" reports a fine-looking ~33ms while hiding the one slow request entirely; a histogram
+lets Prometheus compute real percentiles (`histogram_quantile(0.99, ...)`) after the fact. For the
+worker/queue layer, follow **USE** (Utilization/Saturation/Errors): BullMQ queue depth is this system's
+Saturation signal, and since nothing "emits an event" when a queue merely sits at a depth, it's **polled**
+on an interval into a `Gauge` rather than incremented inline — the first metric in this codebase that has
+to be sampled rather than observed at the moment something happens.
+
+**Implementation.**
+```ts
+// One label rule threaded through both metrics: the matched ROUTE TEMPLATE,
+// never the raw URL — "/courses/:slug" is one label value forever;
+// "/courses/abc123" is a new, unbounded label value per id ever requested,
+// which is exactly the kind of cardinality blowup Prometheus can't absorb.
+const route = req.route?.path ? `${req.baseUrl}${req.route.path}` : 'unmatched';
+httpRequestsTotal.inc({ method, route, status: String(res.statusCode) });
+stopTimer({ method, route, status: String(res.statusCode) }); // Histogram, not an average
+
+// Saturation for the queue layer: no event to hook — poll instead.
+setInterval(async () => {
+  const counts = await eventsQueue.getJobCounts('waiting', 'active', 'delayed', 'failed');
+  for (const [state, count] of Object.entries(counts)) queueDepth.set({ queue: 'events', state }, count);
+}, 5000);
+
+// GET /metrics — Prometheus's own exposition format, generated by prom-client
+res.set('Content-Type', registry.contentType);
+res.send(await registry.metrics());
+```
+
+**Pitfalls.** Never label a metric with something that has effectively unbounded values (raw URLs, user
+ids, request ids) — that's the single most common way to accidentally make Prometheus fall over on memory.
+Don't reach for an average/gauge for latency — a `Histogram` (or summary) is what makes percentiles possible
+after the fact; an average alone can hide the exact tail latency users actually feel. A poll-based `Gauge`
+(queue depth) needs its own error handling around the poll itself — a failed `getJobCounts()` call
+shouldn't crash the interval or silently freeze the metric at a stale value forever. Exclude the scrape
+endpoint and health probes from the RED metrics they'd otherwise pollute — they run on a fixed timer
+regardless of real traffic.
+
+**Quiz idea.** *Why is `http_request_duration_seconds` implemented as a Histogram instead of tracking a
+running average?* → An average collapses the whole distribution into one number and can look perfectly
+healthy while hiding a slow tail (a few very slow requests average out against many fast ones); a Histogram
+preserves bucketed counts so Prometheus can compute real percentiles (p95/p99) after the fact, which is what
+actually reflects what slow-request-affected users experience.
+
+### Lesson (Task 12.3): From Metrics to a Promise — SLIs, SLOs, and Burn-Rate Alerting
+
+**The Problem.** Metrics (Task 12.2) exist in a dashboard, but a dashboard nobody is paged from is just a
+nice-looking screen. Two different failure modes show up if alerting is added carelessly: alerting on a
+raw, fixed threshold either fires constantly on ordinary noise (too tight) or misses a real outage until
+it's mostly over (too loose) — there's no single threshold that's simultaneously fast and quiet. And
+"100% uptime" as an implicit target is worse than useless: it's unachievable for a single-region service,
+and treating it as the bar makes every deploy feel like an unacceptable risk instead of a normal trade-off.
+
+**Options on the table.**
+- *Alert on any 5xx, ever* — maximally sensitive, but a single blip pages someone for nothing.
+- *Alert when a fixed error-rate threshold is crossed for N minutes* — better, but one threshold can't be both fast-to-fire on real outages and quiet on noise at the same time.
+- *Define an explicit SLO + error budget, and alert on BURN RATE (multi-window, multi-threshold)* — the SRE-workbook approach: alerts fire based on how fast the budget is being spent, at more than one severity. (chosen)
+
+**Decision & Why.** Pick a small number of **SLIs** that each represent a genuinely different failure shape
+— Availability (non-5xx proportion), Latency (proportion under a threshold, using the Histogram from Task
+12.2 — never an average), and **Freshness** (age of the oldest undispatched `OutboxEvent` row, per relay
+sink) — the last one specific to this system being event-driven, where a request can return 201 while the
+actual side effect it promised is still silently unprocessed. Each gets an explicit **SLO** (a target over a
+rolling window) and therefore an **error budget** — the amount of failure the SLO already permits, framed as
+a number to spend deliberately rather than a shame to avoid. Alerting on Availability uses **multi-window,
+multi-burn-rate** rules: a fast-burn rule (14.4x the sustainable rate, confirmed across both a 1h and a 5m
+window) pages immediately, while a slow-burn rule (6x, confirmed across 6h and 30m) tickets instead of
+paging — because a brief severe spike and a mild sustained leak deserve different urgency, and one threshold
+can't express both.
+
+**Implementation.**
+```promql
+# Availability SLI (99.5%/30d SLO → 0.5% error budget)
+sum(rate(http_requests_total{status!~"5.."}[5m])) / sum(rate(http_requests_total[5m]))
+
+# Fast-burn alert: sustained 14.4x the budget-consuming rate, confirmed on TWO windows
+(sum(rate(http_requests_total{status=~"5.."}[1h])) / sum(rate(http_requests_total[1h])) > 14.4*0.005)
+  and
+(sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 14.4*0.005)
+
+# Freshness SLI has no "rate" to burn — a direct gauge threshold, per sink
+outbox_oldest_pending_age_seconds{sink="kafka"} > 60   # for: 5m
+```
+A Prometheus `rule_files:` entry loads these; a Grafana dashboard (auto-provisioned via files under
+`./grafana`, same "reproducible from a checked-in file" instinct as the Prisma seed script, Task 1.4) puts a
+graph behind every one of these numbers, so a firing alert always has a graph to open, not just a page.
+
+**Pitfalls.** A latency SLO threshold picked independently of the Histogram's actual bucket boundaries
+(Task 12.2) silently produces an imprecise number — pick the SLO threshold to land on an existing bucket, or
+add the bucket the SLO needs. An error budget that's never spent isn't success — it's a sign the SLO is set
+too conservatively (or the team is over-indexing on caution instead of using the budget the SLO already
+grants). A single fixed-threshold alert is not a substitute for burn-rate alerting — the trade-off it forces
+(too-sensitive vs. too-slow) doesn't go away just because the number looks reasonable at first glance.
+Freshness needs its own alert shape (a gauge crossing a threshold) rather than being force-fit into the same
+ratio-of-two-rates math used for Availability — not every SLI is a rate.
+
+**Quiz idea.** *Why does the Availability SLO use two separate burn-rate alert rules (a "fast burn"
+threshold and a "slow burn" threshold) instead of one rule that fires whenever the error rate exceeds the
+plain SLO target?* → One threshold forces a trade-off between catching a severe short outage quickly and
+avoiding false alarms on ordinary noise. A fast-burn rule (a much higher multiple of the sustainable rate,
+confirmed on both a short and a slightly-longer window) can page immediately on a severe spike, while a
+slow-burn rule (a lower multiple, confirmed over longer windows) catches a milder sustained leak before the
+whole error budget is exhausted — each severity gets a rule shaped for the failure it's meant to catch.

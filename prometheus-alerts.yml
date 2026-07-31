@@ -1,0 +1,90 @@
+# Burn-rate alert rules for devmentor-api's SLOs (Task 12.3).
+# See docs/observability/slos.md for the SLI/SLO definitions and the
+# reasoning behind multi-window, multi-burn-rate alerting — this file is
+# just that doc's rules made executable. Loaded into Prometheus via
+# `rule_files:` in prometheus.yml. Firing state is visible at
+# http://localhost:9090/alerts; there is no Alertmanager wired up in this
+# dev stack to actually route/page on these yet.
+
+groups:
+  - name: devmentor-api-availability-slo
+    rules:
+      # SLO: 99.5% availability over 30d => 0.5% error budget.
+      # Fast burn: sustained 14.4x the budget-consuming rate would exhaust
+      # the full 30-day budget in about 2 days — page immediately.
+      - alert: AvailabilitySLOFastBurn
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[1h]))
+              /
+            sum(rate(http_requests_total[1h]))
+          ) > (14.4 * 0.005)
+          and
+          (
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+              /
+            sum(rate(http_requests_total[5m]))
+          ) > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Availability SLO burning ~14.4x sustainable rate"
+          description: "5xx rate over both the 1h and 5m windows exceeds 14.4x the 99.5% SLO's allowed error rate. At this pace the 30-day error budget is gone in ~2 days."
+
+      # Slow burn: sustained 6x the budget-consuming rate would exhaust the
+      # budget in about 5 days — real, but a ticket, not a page.
+      - alert: AvailabilitySLOSlowBurn
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[6h]))
+              /
+            sum(rate(http_requests_total[6h]))
+          ) > (6 * 0.005)
+          and
+          (
+            sum(rate(http_requests_total{status=~"5.."}[30m]))
+              /
+            sum(rate(http_requests_total[30m]))
+          ) > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Availability SLO burning ~6x sustainable rate"
+          description: "5xx rate over both the 6h and 30m windows exceeds 6x the 99.5% SLO's allowed error rate. At this pace the 30-day error budget is gone in ~5 days."
+
+  - name: devmentor-api-latency-slo
+    rules:
+      # SLO: 95% of requests under 300ms over 30d. Alert when the 5-minute
+      # proportion under the closest bucket (250ms) drops below 95% for a
+      # sustained period — a simpler threshold alert than the availability
+      # burn-rate rules, since a slow-latency SLO breach is rarely as
+      # time-critical as an availability one.
+      - alert: LatencySLOBreach
+        expr: |
+          (
+            sum(rate(http_request_duration_seconds_bucket{le="0.25"}[5m]))
+              /
+            sum(rate(http_request_duration_seconds_count[5m]))
+          ) < 0.95
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Fewer than 95% of requests completing under ~300ms"
+          description: "The Latency SLO (95% of requests under 300ms) has been breached for 10+ minutes."
+
+  - name: devmentor-api-freshness-slo
+    rules:
+      # Freshness has no "rate" to burn — this is a direct gauge threshold,
+      # evaluated per sink so a stuck Kafka consumer isn't masked by a
+      # healthy BullMQ relay (or vice versa) — see Task 10's dual-cursor outbox.
+      - alert: OutboxRelayLagging
+        expr: outbox_oldest_pending_age_seconds > 60
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.sink }} outbox relay is lagging"
+          description: "The oldest not-yet-dispatched OutboxEvent row for sink={{ $labels.sink }} has been over 60s old for 5+ minutes — the relay or a downstream consumer is likely stuck."

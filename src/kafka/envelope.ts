@@ -14,6 +14,9 @@ export const domainEventEnvelope = z.object({
   type: z.string().min(1),
   version: z.literal(1),
   payload: z.unknown(),
+  // Captured OpenTelemetry trace context (Task 12.1) — optional so older
+  // messages (or a future producer that doesn't set it) still parse fine.
+  traceCarrier: z.record(z.string()).nullable().optional(),
 });
 export type DomainEventEnvelope = z.infer<typeof domainEventEnvelope>;
 

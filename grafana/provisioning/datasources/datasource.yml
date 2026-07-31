@@ -1,0 +1,13 @@
+# Auto-provisions the Prometheus datasource (Task 12.3) so a fresh
+# `docker compose up -d` gives a working Grafana with no manual click-through
+# setup — same "reproducible by one command" goal as the rest of
+# docker-compose.yml (Task 0.7).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090 # container-to-container, via the Compose network's DNS
+    isDefault: true
+    editable: false

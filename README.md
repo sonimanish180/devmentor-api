@@ -94,7 +94,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | 9 | Quizzes & timed assessments | ✅ | [0010](./docs/adr/0010-server-authoritative-timing.md) | [Phase 9 module](../devmentor/src/data/backend-build-curriculum.ts) (6 lessons) | — |
 | 10 | Messaging at scale (Kafka) | ✅ | [0011](./docs/adr/0011-kafka-graduation-criteria.md) | [Phase 10 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
 | 11 | Search & content delivery | ✅ | [0012](./docs/adr/0012-postgres-fts-vs-search-engine.md) | [Phase 11 module](../devmentor/src/data/backend-build-curriculum.ts) (3 lessons) | — |
-| 12 | Observability & operations | ⬜ | — | — | — |
+| 12 | Observability & operations | ✅ | [0013](./docs/adr/0013-observability-stack.md) | [Phase 12 module](../devmentor/src/data/backend-build-curriculum.ts) (3 lessons) | — |
 | 13 | Testing & quality | ⬜ | — | — | — |
 | 14 | Containerization (Docker) | ⬜ | — | — | — |
 | 15 | CI/CD, deployment & scaling | ⬜ | — | — | — |
@@ -121,6 +121,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | [0010](./docs/adr/0010-server-authoritative-timing.md) | Server-authoritative timing for quiz attempts | 9 | Accepted |
 | [0011](./docs/adr/0011-kafka-graduation-criteria.md) | Kafka alongside BullMQ (graduation criteria met) | 10 | Accepted |
 | [0012](./docs/adr/0012-postgres-fts-vs-search-engine.md) | Postgres full-text search (not a dedicated engine, yet) | 11 | Accepted |
+| [0013](./docs/adr/0013-observability-stack.md) | Observability stack: OpenTelemetry tracing, Prometheus/Grafana metrics, SLO alerting | 12 | Accepted |
 
 ---
 
