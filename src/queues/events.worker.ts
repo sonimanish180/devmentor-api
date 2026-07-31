@@ -5,8 +5,9 @@ import { logger } from '../lib/logger';
 import { prisma } from '../lib/prisma';
 import { withEventGuard } from '../lib/eventGuard';
 import { notify } from '../notifications';
+import { recordScore } from '../quiz/leaderboard';
 import type { DomainEventJob } from './events.queue';
-import type { LessonCompletedPayload } from '../events/contracts';
+import type { LessonCompletedPayload, QuizSubmittedPayload } from '../events/contracts';
 
 // Long enough to outlive any realistic retry/backoff window or DLQ replay.
 const GUARD_TTL_SECONDS = 30 * 24 * 3600;
@@ -63,6 +64,37 @@ async function notifyLessonCompleted(eventId: string, payload: LessonCompletedPa
   }
 }
 
+/**
+ * Update the contest leaderboard for a `QuizSubmitted` event (Task 9.5).
+ * Deliberately NOT guarded by an event-id marker like the other subscribers
+ * in this file: `recordScore` uses `ZADD ... GT`, which is naturally
+ * idempotent — redelivering the same event just re-asserts "at least this
+ * score," a no-op if it's already recorded. Contrast with
+ * `notifyQuizSubmitted` below, where re-running the side effect WOULD create
+ * a duplicate row — match the idempotency strategy to whether the operation
+ * is naturally idempotent, don't reach for a guard reflexively.
+ */
+async function updateLeaderboardOnQuizSubmitted(payload: QuizSubmittedPayload): Promise<void> {
+  if (!payload.contestMode) return; // opt-in per quiz — most quizzes never touch the leaderboard
+  await recordScore(payload.quizId, payload.userId, payload.score);
+}
+
+async function notifyQuizSubmitted(eventId: string, payload: QuizSubmittedPayload): Promise<void> {
+  const result = await withEventGuard(redis, `event:notified:${eventId}`, GUARD_TTL_SECONDS, async () => {
+    await notify({
+      userId: payload.userId,
+      type: 'QuizSubmitted',
+      title: 'Quiz submitted!',
+      body: `You scored ${payload.score} point${payload.score === 1 ? '' : 's'}.`,
+      data: { quizId: payload.quizId, attemptId: payload.attemptId, score: payload.score },
+    });
+  });
+
+  if (result === 'skipped-duplicate') {
+    logger.info({ eventId }, 'QuizSubmitted: notification already sent for this event — skipping duplicate');
+  }
+}
+
 export function startEventsWorker(): Worker<DomainEventJob> {
   const worker = new Worker<DomainEventJob>(
     'events',
@@ -75,6 +107,14 @@ export function startEventsWorker(): Worker<DomainEventJob> {
           await Promise.all([
             handleLessonCompleted(job.data.eventId, payload),
             notifyLessonCompleted(job.data.eventId, payload),
+          ]);
+          break;
+        }
+        case 'QuizSubmitted': {
+          const payload = job.data.payload as QuizSubmittedPayload;
+          await Promise.all([
+            updateLeaderboardOnQuizSubmitted(payload),
+            notifyQuizSubmitted(job.data.eventId, payload),
           ]);
           break;
         }

@@ -3,6 +3,7 @@ import { redis } from './lib/redis';
 import { startEmailWorker } from './queues/email.worker';
 import { startEventsWorker } from './queues/events.worker';
 import { startOutboxRelay } from './events/relay';
+import { startQuizSweeper } from './quiz/sweeper';
 
 /**
  * The worker process entrypoint (`pnpm worker`). Runs separately from the API
@@ -13,9 +14,13 @@ import { startOutboxRelay } from './events/relay';
  * subscriber worker (Task 7.4). Both are safe to run on multiple worker
  * replicas: the relay uses `FOR UPDATE SKIP LOCKED` so replicas never
  * double-claim a row, and the subscriber is idempotent per event id.
+ *
+ * Phase 9 adds the quiz sweeper (Task 9.4) — a third independent poll loop,
+ * same shape as the relay, reconciling abandoned quiz attempts.
  */
 const workers = [startEmailWorker(), startEventsWorker()];
 const outboxRelay = startOutboxRelay();
+const quizSweeper = startQuizSweeper();
 logger.info({ workers: workers.map((w) => w.name) }, 'worker process started');
 
 let shuttingDown = false;
@@ -24,6 +29,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   shuttingDown = true;
   logger.info({ signal }, 'worker shutting down — draining active jobs');
   await outboxRelay.stop(); // let an in-flight relay tick finish before we stop publishing
+  await quizSweeper.stop();
   await Promise.all(workers.map((w) => w.close())); // waits for in-flight jobs to finish
   await redis.quit();
   process.exit(0);

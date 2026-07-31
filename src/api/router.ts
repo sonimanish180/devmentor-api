@@ -5,6 +5,7 @@ import { courseRouter } from '../modules/course/course.routes';
 import { lessonRouter } from '../modules/lesson/lesson.routes';
 import { progressRouter } from '../modules/progress/progress.routes';
 import { notificationsRouter } from '../modules/notifications/notifications.routes';
+import { quizRouter } from '../modules/quiz/quiz.routes';
 
 /**
  * The versioned API surface. Mounted at `/api/v1` by the app factory, so the
@@ -57,3 +58,4 @@ apiRouter.use('/courses', courseRouter);
 apiRouter.use('/lessons', lessonRouter);
 apiRouter.use('/progress', progressRouter);
 apiRouter.use('/notifications', notificationsRouter);
+apiRouter.use('/quizzes', quizRouter);

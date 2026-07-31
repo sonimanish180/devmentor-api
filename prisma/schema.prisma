@@ -40,6 +40,7 @@ model User {
   refreshTokens RefreshToken[]
   notifications Notification[]
   notificationPreference NotificationPreference?
+  quizAttempts  QuizAttempt[]
 }
 
 model RefreshToken {
@@ -131,6 +132,7 @@ model Lesson {
 
   completions LessonCompletion[]
   quizScores  QuizScore[]
+  timedQuiz   Quiz?
 
   @@unique([moduleId, slug])
   @@index([moduleId])
@@ -225,4 +227,60 @@ model NotificationPreference {
   realtimeEnabled Boolean  @default(true)
   emailEnabled    Boolean  @default(true)
   updatedAt       DateTime @updatedAt
+}
+
+// ─── Timed quizzes (Phase 9) ───────────────────────────────────────────────
+// `QuizScore` (Phase 1) tracks a simple best-score, idempotently — fine for
+// the untimed, embedded quizzes already in lesson content. A TIMED,
+// stateful assessment needs more: a server-set deadline, a state machine
+// (in progress -> submitted | expired), and concurrency control on that
+// transition — hence a genuinely new pair of models rather than stretching
+// QuizScore to cover both jobs.
+model Quiz {
+  id              String   @id @default(cuid())
+  lessonId        String   @unique
+  lesson          Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  durationSeconds Int
+  // Question bank INCLUDING correct answers — server-side only. The API layer
+  // must strip correct answers before returning a quiz to start an attempt;
+  // only `submitAttempt` (server-side) ever reads them to score.
+  questions       Json
+  // Opt-in per quiz: submissions feed a live Redis leaderboard (Task 9.5).
+  contestMode     Boolean  @default(false)
+  published       Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  attempts QuizAttempt[]
+}
+
+enum QuizAttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  EXPIRED
+}
+
+model QuizAttempt {
+  id     String @id @default(cuid())
+  quizId String
+  quiz   Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status    QuizAttemptStatus @default(IN_PROGRESS)
+  startedAt DateTime          @default(now())
+  // Computed by the SERVER at start time (startedAt + quiz.durationSeconds).
+  // Submission is checked against this, never against a client-reported
+  // "time remaining" — see ADR-0010.
+  deadlineAt  DateTime
+  submittedAt DateTime?
+  score       Int?
+  answers     Json?
+  // OCC guard (src/lib/occ.ts, Task 5.2): a double-submit race can flip
+  // status from IN_PROGRESS exactly once.
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([userId, quizId, status]) // "does this user already have an active attempt on this quiz"
+  @@index([status, deadlineAt]) // the sweeper's poll query (Task 9.4)
 }

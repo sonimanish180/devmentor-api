@@ -1567,3 +1567,247 @@ just a technical one.
 "everything disabled"?* → So shipping the preferences feature requires no backfill migration for users who
 existed before it — every pre-existing user is correctly treated as having made no changes yet, which means
 the defaults, not silence.
+
+---
+
+## Phase 9 — Quizzes & Timed Assessments
+
+### Lesson (Task 9.1): Modeling Timed Attempts
+
+**The Problem.** `QuizScore` (Phase 1) tracks a simple best-score per lesson, idempotently — fine for the
+untimed quizzes already embedded in lesson content. A genuinely *timed* assessment is a different shape of
+problem: it has a lifecycle (not started → in progress → submitted or expired), a deadline that must be
+enforced server-side, and a scoring transition that must happen exactly once even under a double-submit.
+Stretching `QuizScore` to also carry a state machine would tangle two different features into one model.
+
+**Options on the table.**
+- *Add timing fields to `QuizScore`* — reuses a table, but conflates "best score ever" (untimed, always-updatable) with "this one timed attempt's lifecycle" (bounded, transitions once).
+- *A new `Quiz` + `QuizAttempt` pair* — `Quiz` holds the question bank + duration + settings; `QuizAttempt` is one row per attempt with its own state machine. (chosen)
+
+**Decision & Why.** `Quiz.questions` stores the full question bank **including correct answers** — server-
+side only; the API layer strips them before a client ever sees a question. `QuizAttempt` carries `status`
+(`IN_PROGRESS`/`SUBMITTED`/`EXPIRED`), `deadlineAt` (server-computed, Task 9.2), and a `version` column
+reusing Task 5.2's OCC helper for the exactly-once scoring transition (Task 9.3).
+
+**Implementation.**
+```prisma
+model Quiz {
+  id              String  @id @default(cuid())
+  lessonId        String  @unique
+  durationSeconds Int
+  questions       Json    // includes correctIndex — never sent to the client as-is
+  contestMode     Boolean @default(false)
+  attempts        QuizAttempt[]
+}
+
+enum QuizAttemptStatus { IN_PROGRESS SUBMITTED EXPIRED }
+
+model QuizAttempt {
+  id         String            @id @default(cuid())
+  quizId     String
+  userId     String
+  status     QuizAttemptStatus @default(IN_PROGRESS)
+  deadlineAt DateTime          // server-computed — see Task 9.2
+  score      Int?
+  version    Int               @default(0) // OCC guard, Task 5.2
+  @@index([userId, quizId, status])
+  @@index([status, deadlineAt]) // the sweeper's poll query, Task 9.4
+}
+```
+
+**Pitfalls.** Never let the "questions with correct answers" shape leak past the service layer into an HTTP
+response — strip the answer key before returning a quiz. Index the columns your state machine actually
+queries by (`[userId, quizId, status]` for "does this user have an active attempt"; `[status, deadlineAt]`
+for the sweeper), not just primary keys.
+
+**Quiz idea.** *Why introduce a new `Quiz`/`QuizAttempt` pair instead of adding a `deadlineAt` column to the
+existing `QuizScore` table?* → `QuizScore` represents an always-updatable best score with no lifecycle;
+a timed attempt has real state (in progress, submitted, expired) and a concurrency-sensitive transition
+between those states — different enough concerns that conflating them would tangle two features into one
+table.
+
+### Lesson (Task 9.2): Server-Authoritative Time
+
+**The Problem.** A "timed" quiz is meaningless if the client decides when time is up. If the server trusts a
+client-reported elapsed time or accepts a client-supplied deadline, anyone can extend their own time limit.
+Separately, starting an attempt has its own race: "check whether the user already has one in progress, then
+create one" is a read-then-write sequence that two simultaneous start requests can both pass.
+
+**Options on the table.**
+- *Client reports remaining time; server trusts it* — trivial, but trivially defeated by any client the user controls.
+- *Server computes and owns the deadline entirely* — the only input from the client is "start now"; the server decides when "now" plus the duration lands. (chosen)
+- *A DB unique constraint alone to prevent duplicate active attempts* — would need a partial/filtered index Prisma's schema DSL can't express directly, and still leaves the read-then-write race window open around the check.
+
+**Decision & Why.** `startAttempt` computes `deadlineAt = now() + quiz.durationSeconds`, entirely server-
+side — a client can request a start, never a duration. The whole operation runs inside `withLock` (Task
+5.4's distributed lock, reused here) so the "check for an active attempt, then create one" sequence is
+serialized per (user, quiz) instead of racing.
+
+**Implementation.**
+```ts
+export async function startAttempt(userId: string, quizId: string) {
+  return withLock(`quiz:start:${userId}:${quizId}`, 5000, async () => {
+    const existing = await repo.findActiveAttempt(userId, quizId);
+    if (existing && existing.deadlineAt.getTime() > Date.now()) return toStartResponse(existing, quiz); // resume
+    const startedAt = new Date();
+    const deadlineAt = new Date(startedAt.getTime() + quiz.durationSeconds * 1000); // SERVER decides
+    return repo.createAttempt({ userId, quizId, startedAt, deadlineAt });
+  });
+}
+```
+
+**Pitfalls.** Never accept a client-supplied duration or deadline, even "just for testing" — it's the one
+thing that must never be client-controlled. A distributed lock turns a busy race into a 409, not a queue —
+clients should treat that 409 as "retry shortly," not a hard failure. Resuming an existing in-progress
+attempt (rather than blindly creating a new one) matters — otherwise a page refresh mid-quiz would silently
+reset the clock in the user's favor.
+
+**Quiz idea.** *Why wrap `startAttempt` in a distributed lock instead of just checking for an existing
+attempt with a `findFirst` query first?* → "Check, then create" is a read-then-write race — two simultaneous
+requests can both see no active attempt and both create one. A lock serializes the whole check-and-create
+sequence per (user, quiz), closing the window a plain query can't.
+
+### Lesson (Task 9.3): Safe Submissions Under Concurrency
+
+**The Problem.** Submitting a quiz has two separate failure modes to close. First, a submission arriving
+after the deadline must be rejected by the server's OWN clock — not by trusting anything the client says
+about timing, and not by waiting for a periodic sweep to have already caught it. Second, a double-submit
+(a flaky network causing a client retry, or a user double-clicking) must score the attempt exactly once,
+not twice, and the loser of that race shouldn't see a raw error for something that, from their point of
+view, already succeeded.
+
+**Decision & Why.** `submitAttempt` re-checks `attempt.deadlineAt` against `Date.now()` at submit time,
+independent of whatever the sweeper (Task 9.4) has or hasn't done yet — late is late, checked fresh, every
+time. The `IN_PROGRESS -> SUBMITTED` transition uses `occUpdate` (Task 5.2) on the attempt's `version`; a
+losing concurrent duplicate doesn't error — it re-fetches and replays the winner's already-computed score,
+the same idempotent-response idiom used since Phase 5's `completeLesson`. On a successful transition, a
+`QuizSubmitted` outbox event is written in the SAME transaction (Phase 7's pattern, reused for a new event
+type) — an event exists if and only if the scoring transition actually committed.
+
+**Implementation.**
+```ts
+if (attempt.deadlineAt.getTime() < Date.now()) {
+  await repo.expireAttempt(attempt.id);              // don't wait for the sweeper
+  throw AppError.conflict('The deadline for this attempt has passed');
+}
+const score = scoreAnswers(attempt.quiz.questions, answers);
+try {
+  await occUpdate(() => repo.submitAttemptTx(attempt, score, answers, outboxPayload)); // versioned UPDATE + outbox write, one tx
+} catch (e) {
+  if (isConflict(e)) {
+    const fresh = await repo.findAttemptById(attempt.id);
+    return { attemptId: attempt.id, score: fresh.score, alreadySubmitted: true }; // replay the winner's result
+  }
+  throw e;
+}
+```
+
+**Pitfalls.** Checking the deadline only via the sweeper (rather than also at submit time) would leave a
+window — between the deadline passing and the next sweep tick — where a late submission could still sneak
+through. Don't let a losing OCC conflict become a hard error the client has to handle specially; replay the
+winning result the same way an already-completed lesson does.
+
+**Quiz idea.** *Why does `submitAttempt` check the deadline itself instead of relying on the sweeper (Task
+9.4) to have already marked a late attempt `EXPIRED`?* → The sweeper runs on an interval, so there's always a
+window after the deadline where an attempt is still `IN_PROGRESS` in the database. Checking the server clock
+directly at submit time closes that window instead of depending on the next scheduled sweep.
+
+### Lesson (Task 9.4): Scheduled Reconciliation — the Sweeper
+
+**The Problem.** `submitAttempt` only rejects a late submission if someone actually tries to submit.
+An abandoned attempt — a closed tab, a dropped connection, a user who simply walks away — never calls
+submit at all, and would sit `IN_PROGRESS` forever without something else closing it out.
+
+**Decision & Why.** A background sweeper polls for `IN_PROGRESS` attempts whose `deadlineAt` has passed and
+flips them to `EXPIRED` (scored 0) — the same terminal state `submitAttempt` reaches on its own when it
+independently notices a late submission. This is **reconciliation, not a business trigger**: it doesn't
+emit an outbox event or notify anyone; it just makes sure the data eventually reflects reality even when
+nobody asked it to.
+
+**Implementation.**
+```ts
+async function sweepOnce() {
+  const result = await prisma.quizAttempt.updateMany({
+    where: { status: 'IN_PROGRESS', deadlineAt: { lt: new Date() } },
+    data: { status: 'EXPIRED', submittedAt: new Date(), score: 0 },
+  });
+  return result.count;
+}
+// same poll-loop shape as the Task 7.3 outbox relay: tick, schedule the next tick, graceful stop()
+```
+
+**Pitfalls.** A sweeper and a submit-time check are meant to be redundant with each other — either alone
+would eventually reach a correct state, but the submit-time check gives an honest "too late" response
+immediately instead of making the user wait for the next sweep tick. Don't reach for per-row processing
+(a transaction, an outbox event) here unless a real feature needs to react to expiry specifically — a blunt
+`updateMany` is the right amount of machinery for pure reconciliation.
+
+**Quiz idea.** *If `submitAttempt` already checks the deadline itself, why is a separate sweeper needed at
+all?* → `submitAttempt` only runs when someone actually submits. An attempt nobody ever submits for (an
+abandoned tab, a dropped connection) would stay `IN_PROGRESS` indefinitely without something else
+periodically reconciling expired-but-untouched rows.
+
+### Lesson (Task 9.5): Live Leaderboards & Matching the Guard to the Operation
+
+**The Problem.** A contest-mode quiz wants a live leaderboard, fed by the same `QuizSubmitted` event that
+already exists. The question this raises: does this new subscriber need the same idempotency guard
+(a Redis marker keyed by event id) as every other subscriber so far?
+
+**Decision & Why.** No — and that's the lesson. `recordScore` uses `ZADD key GT CH score member`: it only
+updates a member's score if the new one is *greater*, so redelivering the same `QuizSubmitted` event twice
+is naturally a no-op the second time — there's nothing to guard. The notification subscriber sitting right
+next to it in the same event handler is guarded, because `notify()` creating a `Notification` row is NOT
+naturally idempotent — running it twice creates two rows. The right idempotency strategy depends on whether
+the underlying operation already tolerates repeats, not on applying the same guard everywhere reflexively.
+
+**Implementation.**
+```ts
+async function updateLeaderboardOnQuizSubmitted(payload: QuizSubmittedPayload) {
+  if (!payload.contestMode) return; // opt-in per quiz
+  await recordScore(payload.quizId, payload.userId, payload.score); // ZADD ... GT — no guard needed, naturally idempotent
+}
+async function notifyQuizSubmitted(eventId: string, payload: QuizSubmittedPayload) {
+  await withEventGuard(redis, `event:notified:${eventId}`, TTL, () => notify({ ... })); // guard IS needed here
+}
+```
+
+**Pitfalls.** Don't reach for an idempotency guard by default on every subscriber — first ask whether the
+operation is naturally safe to repeat (an upsert, a `GT`-conditioned write, a unique constraint) before
+adding one. Contest mode is opt-in per quiz (`Quiz.contestMode`), so most quizzes' submissions never touch
+Redis at all — check that flag before writing, not after.
+
+**Quiz idea.** *Why doesn't the leaderboard subscriber need the same Redis event-id guard the notification
+subscriber uses?* → `ZADD ... GT` is naturally idempotent: reapplying "at least this score" for the same
+member is a no-op if it's already recorded. A guard is only needed for operations that aren't naturally
+safe to repeat, like inserting a new notification row.
+
+### Lesson (Task 9.6): Testing Time & Races
+
+**The Problem.** Concurrency and timing bugs don't show up in sequential, single-request tests. Proving
+"only one attempt gets created," "only one submission gets scored," and "a late submission is always
+rejected" requires tests that actually race requests against each other and against a real clock.
+
+**Decision & Why.** Pure logic (`scoreAnswers`, `toPublicQuestion`) gets ordinary unit tests — no
+infrastructure, run anywhere. The concurrency/timing guarantees are proven with `Promise.all`/`allSettled`
+firing N simultaneous requests (mirroring Task 5.5's pattern) against a live Postgres + Redis, gated behind
+`RUN_DB_TESTS` so the fast local suite doesn't need infra. The deadline test uses a quiz seeded with a very
+short `durationSeconds` and a real (short) sleep, rather than mocking the clock, so it exercises the
+actual server-clock comparison, not a stand-in for it.
+
+**Implementation.**
+```ts
+// N parallel starts -> exactly one IN_PROGRESS row
+const results = await Promise.allSettled(Array.from({ length: 10 }, () => startAttempt(userId, quizId)));
+// N parallel submits -> exactly one "winner", the rest replay its score
+const results2 = await Promise.all(Array.from({ length: 10 }, () => submitAttempt(userId, attemptId, answers)));
+expect(results2.filter(r => !r.alreadySubmitted)).toHaveLength(1);
+```
+
+**Pitfalls.** A sequential loop of requests can never catch a race — always fire concurrent requests with
+`Promise.all`/`allSettled`. Don't fake the clock for the deadline test if a short real sleep is cheap and
+proves the actual code path exercised in production. Assert on the *effect* (row counts, agreement on final
+score) as well as individual response shapes.
+
+**Quiz idea.** *Why does the deadline-enforcement test use a real short sleep instead of mocking
+`Date.now()`?* → It exercises the exact comparison `submitAttempt` performs against the real system clock in
+production, rather than a stand-in that might not catch a subtle bug in how the comparison itself is written.

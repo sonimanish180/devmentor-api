@@ -91,7 +91,7 @@ High-level progress. **Granular, task-level tracking with execution prompts live
 | 6 | Async processing & queues (BullMQ) | ✅ | [0007](./docs/adr/0007-bullmq-task-queue.md) | [Phase 6 module](../devmentor/src/data/backend-build-curriculum.ts) (3 lessons) | — |
 | 7 | Event-driven architecture & outbox | ✅ | [0008](./docs/adr/0008-transactional-outbox.md) | [Phase 7 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
 | 8 | Notifications (multi-channel, realtime) | ✅ | [0009](./docs/adr/0009-notifications-ports-adapters-realtime.md) | [Phase 8 module](../devmentor/src/data/backend-build-curriculum.ts) (4 lessons) | — |
-| 9 | Quizzes & timed assessments | ⬜ | — | — | — |
+| 9 | Quizzes & timed assessments | ✅ | [0010](./docs/adr/0010-server-authoritative-timing.md) | [Phase 9 module](../devmentor/src/data/backend-build-curriculum.ts) (6 lessons) | — |
 | 10 | Messaging at scale (Kafka) | ⬜ | — | — | — |
 | 11 | Search & content delivery | ⬜ | — | — | — |
 | 12 | Observability & operations | ⬜ | — | — | — |
@@ -118,6 +118,7 @@ Every real decision is recorded in [`docs/adr/`](./docs/adr) as `NNNN-title.md` 
 | [0007](./docs/adr/0007-bullmq-task-queue.md) | BullMQ for background jobs (not Kafka yet) | 6 | Accepted |
 | [0008](./docs/adr/0008-transactional-outbox.md) | Transactional outbox for domain events | 7 | Accepted |
 | [0009](./docs/adr/0009-notifications-ports-adapters-realtime.md) | Notifications: ports/adapters + realtime behind a flag | 8 | Accepted |
+| [0010](./docs/adr/0010-server-authoritative-timing.md) | Server-authoritative timing for quiz attempts | 9 | Accepted |
 
 ---
 

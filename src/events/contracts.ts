@@ -18,9 +18,17 @@ export interface LessonCompletedPayload {
   xp: number;
 }
 
-export type DomainEvent = {
-  type: 'LessonCompleted';
-  payload: LessonCompletedPayload;
-};
+export interface QuizSubmittedPayload {
+  userId: string;
+  quizId: string;
+  attemptId: string;
+  score: number;
+  /** Whether this quiz opts into the live leaderboard (Task 9.5) — travels with the event so the subscriber doesn't need a second lookup. */
+  contestMode: boolean;
+}
+
+export type DomainEvent =
+  | { type: 'LessonCompleted'; payload: LessonCompletedPayload }
+  | { type: 'QuizSubmitted'; payload: QuizSubmittedPayload };
 
 export type DomainEventType = DomainEvent['type'];
